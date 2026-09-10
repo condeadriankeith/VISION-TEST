@@ -21,7 +21,7 @@ INFERENCE_HEIGHT: int = 360
 LANDMARK_SMOOTHING_ALPHA: float = 0.48
 
 # MediaPipe Hand Tracking Configuration
-MAX_NUM_HANDS: int = 1
+MAX_NUM_HANDS: int = 2
 MIN_DETECTION_CONFIDENCE: float = 0.7
 MIN_TRACKING_CONFIDENCE: float = 0.6
 
@@ -30,6 +30,8 @@ MIN_TRACKING_CONFIDENCE: float = 0.6
 OPEN_PALM_FINGER_THRESHOLD: int = 4   # At least 4 extended fingers = Open
 CLOSED_PALM_FINGER_THRESHOLD: int = 1 # At most 1 extended finger = Closed
 GESTURE_SMOOTHING_FRAMES: int = 5     # Temporal smoothing buffer length
+CONTINUOUS_OPENNESS_MIN: float = 0.22 # Below this normalized ratio = fully closed fist
+CONTINUOUS_OPENNESS_MAX: float = 0.70 # Above this normalized ratio = fully open palm
 
 # 3D Camera Projection Configuration
 FOCAL_LENGTH: float = 950.0            # Camera focal length in pixels
@@ -53,20 +55,31 @@ SHADOW_BLUR_MIN: int = 9
 SHADOW_BLUR_MAX: int = 35
 SHADOW_OFFSET_FACTOR: float = 0.25
 
-# Palm Emergence & Retraction Kinematics
+# Palm Emergence & Retraction Kinematics (Flowy Blossom & Vortex Funnel)
 EMERGENCE_SPEED: float = 3.6           # Legacy base speed (kept for compat)
 SPAWN_SPEED: float = 7.0               # Fast flowy pop-out rate (units/sec) — full spawn ~0.15s
-COLLAPSE_SPEED: float = 4.6            # Vacuum suck-in rate (units/sec) — full collapse ~0.22s
+COLLAPSE_SPEED: float = 2.4            # Satisfying suction rate (units/sec) — full vacuum suck ~0.42s
 EMERGENCE_STAGGER: float = 0.10        # Legacy stagger (kept for compat)
 SPAWN_STAGGER: float = 0.055           # Snappy stagger between center and outer cubes on spawn
-COLLAPSE_STAGGER: float = 0.075        # Funnel stagger on collapse (outers dive first, center last)
+COLLAPSE_STAGGER: float = 0.040        # Funnel stagger on collapse (outers sweep in first, framing center)
 PALM_SUBMERGE_DEPTH: float = 18.0      # Submerged depth inside palm where cubes emerge from (px)
-# Palm-center vacuum suck / vortex flow (collapse only)
-SUCK_PULL_STRENGTH: float = 2600.0     # Acceleration pulling cubes toward palm center (px/s^2)
-SUCK_SWIRL_STRENGTH: float = 900.0     # Tangential vortex force for flowy spiral (px/s^2)
-SUCK_MAX_SPEED: float = 1400.0         # Clamp on suck-induced speed so it stays smooth, not teleporty
+
+# Fountain Blossom & Vortex Suction Dynamics
+FOUNTAIN_ARC_HEIGHT: float = 42.0      # Curved peak elevation during blossom fountain emergence (px)
+FOUNTAIN_OUTWARD_SPREAD: float = 26.0  # Radial flower-petal splay as cubes fountain out (px)
+SUCK_PULL_STRENGTH: float = 4800.0     # Gravitational acceleration pulling cubes toward palm center (px/s^2)
+SUCK_SWIRL_STRENGTH: float = 2400.0    # Tangential vortex force for accelerated whirlpool spiral (px/s^2)
+SUCK_MAX_SPEED: float = 1600.0         # Clamp on suck-induced speed so it stays smooth, not teleporty
+SUCTION_STRETCH_FACTOR: float = 0.30   # Tidal spaghettification stretch along pull vector as cubes dive in
 PORTAL_RING_ENABLED: bool = False      # Disabled to eliminate 2D ring/ripple overlays on palm
 PORTAL_MAX_RADIUS: float = 20.0        # Radius of palm emergence aperture ring (px)
+
+# Dual-Palm Procedural Midpoint Configuration
+DUAL_HAND_ACCORDION_MIN_SPACING: float = 48.0   # Minimum cube spacing when hands are close (px)
+DUAL_HAND_ACCORDION_MAX_SPACING: float = 165.0  # Maximum cube spacing when hands are far apart (px)
+DUAL_HAND_REF_DISTANCE: float = 320.0           # Reference inter-palm distance for 1:1 accordion scale (px)
+DUAL_HAND_ELEVATION_OFFSET: float = 40.0        # Hover lift perpendicular to inter-palm bridge axis (px)
+DUAL_HAND_SMOOTHING_ALPHA: float = 0.35         # Temporal smoothing for dual-hand midpoint coordinate frame
 
 # 3D Cube Geometry & Spatial Layout — 2-inch cubes relative to palm width.
 # Palm width (index-to-pinky knuckles) ~= 3.5in ~= palm_scale px, so a 2in cube
@@ -77,6 +90,7 @@ CUBE_COUNT: int = 3
 CUBE_SIZE: float = 30.0                # Half-extent -> 60px side ~= 3 inches at ref distance
 CUBE_HORIZONTAL_SPACING: float = 74.0  # Center-to-center (60px cube + ~14px gap)
 CUBE_ELEVATION_OFFSET: float = 105.0   # Hover height above palm, scales with distance
+UPWARD_ELEVATION_BOOST: float = 38.0  # Additional elevation lift when palm opens/faces skyward (px)
 MIN_VISIBLE_SCALE: float = 0.02        # Below this threshold, cube is considered vanished
 
 # Procedural Organic Floating Configuration (Multi-Octave Harmonics)
@@ -106,6 +120,33 @@ COLLISION_FRICTION: float = 0.35       # Tangential friction generating rotation
 AIR_DRAG_QUADRATIC: float = 0.0016     # Aerodynamic quadratic air drag
 ANGULAR_DRAG: float = 0.975            # Multiplicative rotational damping per tick
 HAND_INERTIAL_LAG_FACTOR: float = 0.40 # Inertia lag response to hand acceleration
+
+# Inter-Cube Physical Collision Tunables
+CUBE_COLLISION_RADIUS_FACTOR: float = 1.25  # Corner-aware bounding sphere (37.5px radius for 30px half-extent)
+CUBE_COLLISION_RESTITUTION: float = 0.88    # High-elasticity rebound between colliding cubes
+CUBE_RECOIL_DURATION: float = 0.45          # Duration to loosen hover spring after collision for billiard recoil (s)
+CUBE_SPARK_ENABLED: bool = False            # Disabled to keep 3D scene clean without visual noise
+
+# Telekinesis Force Mechanics Tunables
+PINCH_THRESHOLD_PX: float = 36.0            # Thumb-to-index distance threshold to trigger Force Grip (px)
+PINCH_RELEASE_THRESHOLD_PX: float = 52.0    # Hysteresis release distance threshold to prevent jitter
+FORCE_FLING_MULTIPLIER: float = 1.85        # Fling impulse velocity multiplier on release
+FORCE_FLING_FREE_TIME: float = 1.2          # Ballistic free-flight duration before spring recall (seconds)
+FORCE_PUSH_SPEED_THRESH: float = 380.0      # Forward palm thrust velocity (px/s) to trigger Force Push
+FORCE_PUSH_IMPULSE: float = 540.0           # Shockwave blast impulse knocking cubes away
+FORCE_PUSH_COOLDOWN: float = 0.4            # Minimum interval between force pushes (seconds)
+
+# Palm-Wave Tornado Procedural Cyclonic Funnel Tunables
+TORNADO_WAVE_MIN_SPEED: float = 220.0       # Minimum hand waving speed (px/sec) to spin up cyclone
+TORNADO_WAVE_MAX_SPEED: float = 650.0       # Waving speed at full cyclone intensity
+TORNADO_ATTACK_RATE: float = 3.5            # Intensity ramp-up speed per second
+TORNADO_DECAY_RATE: float = 2.2             # Intensity cool-down speed per second
+TORNADO_SPIN_RATE: float = 12.5             # Base orbital cyclone spin rate (rad/sec)
+TORNADO_FUNNEL_HEIGHT: float = 145.0        # Vertical elevation extent of tornado (px)
+TORNADO_BASE_RADIUS: float = 28.0           # Tight base spiral radius (px)
+TORNADO_TOP_RADIUS: float = 90.0            # Flaring top vortex radius (px)
+TORNADO_VERTICAL_WAVE_FREQ: float = 4.2     # Heave frequency up/down tornado funnel
+
 # Finger Collision & Procedural Interaction Configuration
 FINGER_COLLIDER_RADIUS: float = 20.0   # Effective collision radius for each fingertip (px)
 FINGER_RESTITUTION: float = 0.80       # Elastic bounciness when striking a cube

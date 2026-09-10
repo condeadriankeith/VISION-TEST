@@ -82,22 +82,70 @@ class HologramApplication:
         cv2.addWeighted(top_slice, 0.25, top_tint, 0.75, 0, top_slice)
         cv2.line(frame, (0, top_bar_height), (w, top_bar_height), material.hud_accent, 1)
 
-        # 2. Status Indicators & Dynamic Finger Interaction Feedback
+        # 2. Status Indicators & Dynamic Telekinesis / Collision Feedback
         hand_detected = len(poses) > 0
         latest_hit = self.renderer.latest_contact
+        recent_cube_cols = self.renderer.physics_world.recent_cube_collisions
+        grabbed_idx = self.renderer.physics_world.grabbed_cube_idx
+        force_push_act = self.renderer.physics_world.force_push_active > 0.0
 
         if hand_detected:
-            primary_pose = poses[0]
-            if latest_hit is not None:
+            if self.renderer.tornado_intensity > 0.05:
+                cyclone_pct = int(self.renderer.tornado_intensity * 100)
+                gesture_text = f"TORNADO: [PROCEDURAL CYCLONE {cyclone_pct}%]"
+                gesture_color = (120, 255, 230)
+                hand_text = f"HANDS: {len(poses)}"
+            elif force_push_act:
+                gesture_text = "TELEKINESIS: [FORCE PUSH BLAST!]"
+                gesture_color = (255, 120, 255)
+                hand_text = f"HANDS: {len(poses)}"
+            elif grabbed_idx is not None:
+                gesture_text = f"TELEKINESIS: [FORCE GRIP - CUBE {grabbed_idx}]"
+                gesture_color = (120, 240, 255)
+                hand_text = f"HANDS: {len(poses)}"
+            elif recent_cube_cols:
+                col = recent_cube_cols[-1]
+                gesture_text = f"CUBE REBOUND: [CUBE {col.cube_a} <-> {col.cube_b} | IMPULSE: {int(col.impulse_mag)}]"
+                gesture_color = (100, 255, 230)
+                hand_text = f"HANDS: {len(poses)}"
+            elif latest_hit is not None:
                 gesture_text = f"INTERACTION: [{latest_hit.finger_name.upper()} HIT! IMPULSE: {int(latest_hit.impulse_mag)}]"
                 gesture_color = (120, 240, 255)  # Glowing electric cyan/gold for impact
-            elif primary_pose.is_open:
-                gesture_text = f"PALM: OPEN  [TILT P:{int(primary_pose.pitch_deg):+2d}° R:{int(primary_pose.roll_deg):+2d}°]"
-                gesture_color = (200, 240, 200)  # Clean soft green
+                hand_text = f"HANDS: {len(poses)}"
+            elif len(poses) >= 2:
+                p_left = min(poses[:2], key=lambda p: p.palm_center_3d[0])
+                p_right = max(poses[:2], key=lambda p: p.palm_center_3d[0])
+                l_pct = int(p_left.openness_ratio * 100)
+                r_pct = int(p_right.openness_ratio * 100)
+                if p_left.is_open and p_right.is_open:
+                    gesture_text = f"DUAL BRIDGE: [L:OPEN ({l_pct}%) | R:OPEN ({r_pct}%)]"
+                    gesture_color = (255, 230, 160)
+                elif p_left.is_open and not p_right.is_open:
+                    gesture_text = f"ANCHORED: LEFT PALM ({l_pct}%) [RIGHT CLOSED]"
+                    gesture_color = (200, 240, 200)
+                elif p_right.is_open and not p_left.is_open:
+                    gesture_text = f"ANCHORED: RIGHT PALM ({r_pct}%) [LEFT CLOSED]"
+                    gesture_color = (200, 240, 200)
+                else:
+                    gesture_text = "BOTH CLOSED: [VORTEX RETRACTED]"
+                    gesture_color = (180, 185, 195)
+                hand_text = "HANDS: DUAL"
             else:
-                gesture_text = "PALM: CLOSED [PHYSICS RETRACTED]"
-                gesture_color = (180, 185, 195)  # Matte slate
-            hand_text = f"HAND: {primary_pose.handedness.upper()}"
+                primary_pose = poses[0]
+                op_pct = int(primary_pose.openness_ratio * 100)
+                if primary_pose.is_open:
+                    if primary_pose.pitch_deg < -50.0:
+                        orient_str = "UPWARD"
+                    elif abs(primary_pose.roll_deg) > 45.0:
+                        orient_str = "SIDEWAYS"
+                    else:
+                        orient_str = "FORWARD"
+                    gesture_text = f"PALM: OPEN {orient_str} ({op_pct}%) [P:{int(primary_pose.pitch_deg):+2d}° R:{int(primary_pose.roll_deg):+2d}°]"
+                    gesture_color = (200, 240, 200)
+                else:
+                    gesture_text = f"PALM: CLOSED ({op_pct}%) [VORTEX RETRACTED]"
+                    gesture_color = (180, 185, 195)
+                hand_text = f"HAND: {primary_pose.handedness.upper()}"
         else:
             hand_text = "HAND: NONE"
             gesture_text = "PALM: WAITING FOR HAND"
@@ -106,7 +154,7 @@ class HologramApplication:
         # Text rendering on Top Bar
         font = cv2.FONT_HERSHEY_SIMPLEX
         cv2.putText(frame, hand_text, (20, 34), font, 0.65, (230, 230, 230), 2, cv2.LINE_AA)
-        cv2.putText(frame, gesture_text, (180, 34), font, 0.60, gesture_color, 2, cv2.LINE_AA)
+        cv2.putText(frame, gesture_text, (180, 34), font, 0.58, gesture_color, 2, cv2.LINE_AA)
 
         # Camera & Material indicators
         cam_str = f"CAM: {self.current_cam_index}"
@@ -127,9 +175,9 @@ class HologramApplication:
 
         skel_status = "VISIBLE" if self.show_skeleton else "INVISIBLE"
         instructions = (
+            f"Telekinesis: Pinch-Grip / Fling / Force-Push  |  "
             f"[V] Cam: {self.current_cam_index}  |  "
             f"[S] Skeleton: {skel_status}  |  "
-            f"Prismatic 6-DOF Organic Physics & Palm Emergence Active  |  "
             f"[Q/Esc] Exit"
         )
         cv2.putText(
@@ -146,9 +194,14 @@ class HologramApplication:
     def run(self) -> None:
         """High-performance camera acquisition and rendering loop."""
         print("[HologramApp] Application running.")
-        print("[HologramApp] Hold your hand in front of the camera:")
-        print("  - OPEN your palm: 3 holographic cubes spawn and hover above your palm.")
-        print("  - CLOSE your palm: cubes shrink and vanish smoothly.")
+        print("[HologramApp] Hold your hand(s) in front of the camera:")
+        print("  - OPEN palm: 3 holographic cubes blossom out in a flowy fountain arc.")
+        print("  - CLOSE palm: cubes spiral smoothly into your palm via vortex whirlpool.")
+        print("  - WAVE OPEN PALM FASTER: Whirling 3D procedural tornado cyclone for all 3 cubes!")
+        print("  - PINCH (Thumb + Index): Clean optimized telekinetic grip without visual clutter — grab and fling!")
+        print("  - PALM FORWARD THRUST: Telekinetic Force Push blasts cubes away!")
+        print("  - CUBES COLLIDE: Real billiard-ball elastic rebound & corner-aware momentum transfer!")
+        print("  - SHOW 2ND PALM: cubes procedurally bridge the middle between both hands.")
         print("  - Press 'V' to switch between cameras.")
         print("  - Press 'S' to toggle virtual skeleton overlay.")
         print("  - Press 'Q' or 'Esc' to exit.")
@@ -183,24 +236,28 @@ class HologramApplication:
 
                 poses = cached_poses
                 hand_detected = len(poses) > 0
-                is_open = poses[0].is_open if hand_detected else False
+                is_open = any(p.is_open for p in poses) if hand_detected else False
 
-                # Update 3D cube physics and animations
+                # Update 3D cube physics, flowy kinematics, and dual-hand bridge
                 self.renderer.update(
                     hand_detected=hand_detected,
                     is_open=is_open,
                     pose=poses[0] if poses else None,
+                    poses=poses,
                 )
 
-                # Render skeleton and 3D hovering cubes
-                for pose in poses:
-                    if self.show_skeleton:
+                # Render skeleton for each detected hand
+                if self.show_skeleton:
+                    for pose in poses:
                         self.tracker.draw_skeleton(
                             frame, pose, color=self.current_material.bevel_color
                         )
 
-                    # Render solid smooth grey cubes with lighting and bevel highlights
-                    self.renderer.render(frame, pose, self.current_material)
+                # Render solid smooth prismatic cubes once per frame
+                if hand_detected:
+                    self.renderer.render(frame, poses[0], self.current_material, poses=poses)
+                else:
+                    self.renderer.render(frame, None, self.current_material)
 
                 # Draw optimized HUD
                 self._draw_hud(frame, poses)

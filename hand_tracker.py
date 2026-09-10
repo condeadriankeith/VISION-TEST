@@ -61,6 +61,7 @@ class HandPose:
     is_open: bool
     open_confidence: float
     finger_states: List[bool]
+    openness_ratio: float = 1.0
     palm_normal_3d: Tuple[float, float, float] = (0.0, 0.0, -1.0)
     palm_up_3d: Tuple[float, float, float] = (0.0, -1.0, 0.0)
     palm_right_3d: Tuple[float, float, float] = (1.0, 0.0, 0.0)
@@ -68,6 +69,13 @@ class HandPose:
     pitch_deg: float = 0.0
     roll_deg: float = 0.0
     fingers: List[FingerTipCollider] = field(default_factory=list)
+    # Telekinesis Force Perception
+    is_pinching: bool = False
+    pinch_point_3d: Optional[Tuple[float, float, float]] = None
+    pinch_dist_px: float = 999.0
+    palm_thrust_speed: float = 0.0
+    hand_velocity_3d: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    palm_speed: float = 0.0
 
 
 class HandTracker:
@@ -134,6 +142,20 @@ class HandTracker:
         self._prev_finger_vel: dict[str, List[np.ndarray]] = {}
         self._prev_finger_time: dict[str, float] = {}
 
+        # Continuous palm openness smoothing
+        self._prev_openness: dict[str, float] = {}
+
+        # 3D Up vector temporal smoothing
+        self._prev_up_3d: dict[str, Tuple[float, float, float]] = {}
+
+        # Hand/Palm 3D velocity and force thrust tracking
+        self._prev_palm_pos: dict[str, np.ndarray] = {}
+        self._prev_palm_vel: dict[str, np.ndarray] = {}
+        self._prev_palm_time: dict[str, float] = {}
+
+        # Pinch gesture hysteresis state
+        self._prev_pinching: dict[str, bool] = {}
+
     def _ensure_model_file(self, target_path: str) -> None:
         """Downloads the MediaPipe task model if not present locally."""
         if not os.path.exists(target_path):
@@ -176,6 +198,12 @@ class HandTracker:
             self._prev_finger_pos.clear()
             self._prev_finger_vel.clear()
             self._prev_finger_time.clear()
+            self._prev_openness.clear()
+            self._prev_up_3d.clear()
+            self._prev_palm_pos.clear()
+            self._prev_palm_vel.clear()
+            self._prev_palm_time.clear()
+            self._prev_pinching.clear()
             return poses
 
         for i, raw_landmarks in enumerate(result.hand_landmarks):
@@ -212,17 +240,17 @@ class HandTracker:
             else:
                 raw_up_x, raw_up_y = 0.0, -1.0
 
-            # Compute true 3D Normal Vector from 3D Landmark vectors
+            # Compute true 3D Normal Vector from aspect-corrected 3D Landmark vectors
             v_up_3d = np.array([
-                middle_mcp.x - wrist.x,
-                middle_mcp.y - wrist.y,
-                (middle_mcp.z - wrist.z) * 1.5,
+                (middle_mcp.x - wrist.x) * width,
+                (middle_mcp.y - wrist.y) * height,
+                (middle_mcp.z - wrist.z) * width,
             ], dtype=np.float32)
 
             v_across_3d = np.array([
-                index_mcp.x - pinky_mcp.x,
-                index_mcp.y - pinky_mcp.y,
-                (index_mcp.z - pinky_mcp.z) * 1.5,
+                (index_mcp.x - pinky_mcp.x) * width,
+                (index_mcp.y - pinky_mcp.y) * height,
+                (index_mcp.z - pinky_mcp.z) * width,
             ], dtype=np.float32)
 
             # Cross-product yields palm normal (pointing outwards from palm face)
@@ -236,6 +264,9 @@ class HandTracker:
                 raw_normal = raw_normal / norm_len
             else:
                 raw_normal = np.array([0.0, 0.0, -1.0], dtype=np.float32)
+
+            v_up_len = float(np.linalg.norm(v_up_3d))
+            raw_up_3d = (v_up_3d / v_up_len) if v_up_len > 1e-5 else np.array([0.0, -1.0, 0.0], dtype=np.float32)
 
             # 3. Compute Palm Scale & Estimated Depth (Z)
             raw_scale = max(
@@ -275,6 +306,11 @@ class HandTracker:
                 else:
                     smoothed_normal = np.array([0.0, 0.0, -1.0], dtype=np.float32)
 
+                prev_u3d = np.array(self._prev_up_3d.get(handedness, raw_up_3d), dtype=np.float32)
+                smoothed_u3d = alpha * raw_up_3d + (1.0 - alpha) * prev_u3d
+                s_u_len = float(np.linalg.norm(smoothed_u3d))
+                smoothed_u3d = (smoothed_u3d / s_u_len) if s_u_len > 1e-5 else raw_up_3d
+
                 prev_c3d = self._prev_centers_3d[handedness]
                 cz = alpha * raw_cz + (1.0 - alpha) * prev_c3d[2]
             else:
@@ -282,6 +318,7 @@ class HandTracker:
                 up_vx, up_vy = raw_up_x, raw_up_y
                 palm_scale = raw_scale
                 smoothed_normal = raw_normal
+                smoothed_u3d = raw_up_3d
                 cz = raw_cz
 
             self._prev_centers[handedness] = (cx, cy)
@@ -292,16 +329,28 @@ class HandTracker:
                 float(smoothed_normal[1]),
                 float(smoothed_normal[2]),
             )
+            self._prev_up_3d[handedness] = (
+                float(smoothed_u3d[0]),
+                float(smoothed_u3d[1]),
+                float(smoothed_u3d[2]),
+            )
             self._prev_centers_3d[handedness] = (float(cx), float(cy), float(cz))
 
             # 3D Orthonormal Basis: Normal (N), Up (U), Right (R)
             norm_3d = smoothed_normal.copy()
-            # 3D Up vector orthogonalized to normal
-            raw_u = np.array([up_vx, up_vy, 0.0], dtype=np.float32)
-            raw_u -= np.dot(raw_u, norm_3d) * norm_3d
-            u_len = float(np.linalg.norm(raw_u))
-            u_3d = raw_u / u_len if u_len > 1e-5 else np.array([0.0, -1.0, 0.0], dtype=np.float32)
-            # 3D Right vector: U x N
+            # 3D Up vector: orthogonalize smoothed true 3D up vector against normal
+            u_proj = smoothed_u3d - np.dot(smoothed_u3d, norm_3d) * norm_3d
+            u_len = float(np.linalg.norm(u_proj))
+            if u_len > 1e-4:
+                u_3d = u_proj / u_len
+            else:
+                fallback = np.array([0.0, -1.0, 0.0], dtype=np.float32)
+                if abs(float(np.dot(fallback, norm_3d))) > 0.9:
+                    fallback = np.array([0.0, 0.0, -1.0], dtype=np.float32)
+                u_proj = fallback - np.dot(fallback, norm_3d) * norm_3d
+                u_3d = u_proj / max(float(np.linalg.norm(u_proj)), 1e-5)
+
+            # 3D Right vector: R = U x N
             r_3d = np.cross(u_3d, norm_3d)
             r_len = float(np.linalg.norm(r_3d))
             if r_len > 1e-5:
@@ -317,7 +366,7 @@ class HandTracker:
             pitch_deg = math.degrees(math.asin(float(np.clip(-norm_3d[1], -1.0, 1.0))))
             roll_deg = math.degrees(math.atan2(float(norm_3d[0]), float(-norm_3d[2])))
 
-            # 5. Finger Extension Analysis
+            # 5. Finger Extension Analysis & Continuous Openness Ratio
             finger_states: List[bool] = []
             wrist_px = (wrist.px, wrist.py)
 
@@ -326,9 +375,11 @@ class HandTracker:
             thumb_base_dist = math.hypot(points[2].px - wrist.px, points[2].py - wrist.py)
             thumb_extended = thumb_tip_dist > (0.8 * thumb_base_dist)
             finger_states.append(thumb_extended)
+            thumb_ratio = float(np.clip((thumb_tip_dist / max(thumb_base_dist, 1e-4) - 0.45) / 0.55, 0.0, 1.0))
 
             # 4 Fingers: Index, Middle, Ring, Pinky
             extended_count = 1 if thumb_extended else 0
+            finger_ratios = [thumb_ratio]
             for tip_idx, pip_idx, mcp_idx in zip(
                 self.FINGER_TIPS[1:], self.FINGER_PIPS[1:], self.FINGER_MCPS[1:]
             ):
@@ -340,6 +391,18 @@ class HandTracker:
                 finger_states.append(is_extended)
                 if is_extended:
                     extended_count += 1
+                cur_ratio = float(np.clip((tip_dist / max(mcp_dist, 1e-4) - 0.95) / 0.65, 0.0, 1.0))
+                finger_ratios.append(cur_ratio)
+
+            # Continuous openness ratio with EMA smoothing
+            raw_openness = sum(finger_ratios) / len(finger_ratios)
+            op_min = getattr(config, "CONTINUOUS_OPENNESS_MIN", 0.22)
+            op_max = getattr(config, "CONTINUOUS_OPENNESS_MAX", 0.70)
+            norm_openness = float(np.clip((raw_openness - op_min) / max(op_max - op_min, 1e-4), 0.0, 1.0))
+
+            prev_op = self._prev_openness.get(handedness, norm_openness)
+            smoothed_openness = 0.35 * norm_openness + 0.65 * prev_op
+            self._prev_openness[handedness] = smoothed_openness
 
             # 6. Gesture Decision with Temporal Hysteresis
             instant_open = extended_count >= config.OPEN_PALM_FINGER_THRESHOLD
@@ -400,6 +463,47 @@ class HandTracker:
             self._prev_finger_pos[handedness] = current_positions
             self._prev_finger_vel[handedness] = current_velocities
 
+            # 8. Optimized Pinch Detection with Hysteresis (Thumb Tip to Index Tip 3D distance)
+            thumb_pos = current_positions[0]
+            index_pos = current_positions[1]
+            pinch_dist = float(np.linalg.norm(thumb_pos - index_pos))
+            was_pinching = self._prev_pinching.get(handedness, False)
+            pinch_thresh = (
+                getattr(config, "PINCH_RELEASE_THRESHOLD_PX", 52.0)
+                if was_pinching
+                else getattr(config, "PINCH_THRESHOLD_PX", 36.0)
+            )
+            is_pinching = pinch_dist < pinch_thresh
+            self._prev_pinching[handedness] = is_pinching
+            pinch_mid = (thumb_pos + index_pos) * 0.5
+            pinch_point_3d = (float(pinch_mid[0]), float(pinch_mid[1]), float(pinch_mid[2]))
+
+            # 9. Palm 3D Velocity & Forward Thrust / Waving Speed
+            curr_palm_vec = np.array([cx, cy, cz], dtype=np.float32)
+            prev_p_time = self._prev_palm_time.get(handedness, now_sec - 0.033)
+            dt_palm = float(np.clip(now_sec - prev_p_time, 0.005, 0.1))
+            self._prev_palm_time[handedness] = now_sec
+
+            prev_p_pos = self._prev_palm_pos.get(handedness, None)
+            prev_p_vel = self._prev_palm_vel.get(handedness, None)
+            if prev_p_pos is not None:
+                raw_p_vel = (curr_palm_vec - prev_p_pos) / dt_palm
+                if prev_p_vel is not None:
+                    p_vel = 0.60 * raw_p_vel + 0.40 * prev_p_vel
+                else:
+                    p_vel = raw_p_vel
+            else:
+                p_vel = np.zeros(3, dtype=np.float32)
+
+            self._prev_palm_pos[handedness] = curr_palm_vec
+            self._prev_palm_vel[handedness] = p_vel
+
+            # Calculate thrust along palm normal or camera forward direction
+            vel_along_norm = float(np.dot(p_vel, norm_3d))
+            cam_forward_vel = -float(p_vel[2])
+            thrust_speed = max(0.0, vel_along_norm, cam_forward_vel) if is_open else 0.0
+            palm_speed = float(np.linalg.norm(p_vel))
+
             pose = HandPose(
                 handedness=handedness,
                 landmarks=points,
@@ -410,6 +514,7 @@ class HandTracker:
                 is_open=is_open,
                 open_confidence=open_ratio,
                 finger_states=finger_states,
+                openness_ratio=smoothed_openness,
                 palm_normal_3d=(float(norm_3d[0]), float(norm_3d[1]), float(norm_3d[2])),
                 palm_up_3d=(float(u_3d[0]), float(u_3d[1]), float(u_3d[2])),
                 palm_right_3d=(float(r_3d[0]), float(r_3d[1]), float(r_3d[2])),
@@ -417,6 +522,12 @@ class HandTracker:
                 pitch_deg=pitch_deg,
                 roll_deg=roll_deg,
                 fingers=finger_colliders,
+                is_pinching=is_pinching,
+                pinch_point_3d=pinch_point_3d if is_pinching else None,
+                pinch_dist_px=pinch_dist,
+                palm_thrust_speed=thrust_speed,
+                hand_velocity_3d=(float(p_vel[0]), float(p_vel[1]), float(p_vel[2])),
+                palm_speed=palm_speed,
             )
             poses.append(pose)
 

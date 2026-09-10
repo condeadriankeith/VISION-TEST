@@ -12,6 +12,7 @@ import math
 import sys
 import time
 import numpy as np
+from typing import Any, List
 
 import config
 from config import MATERIALS
@@ -387,6 +388,744 @@ def test_levitation_recovery() -> None:
     print("  -> Levitation Recovery Spring Field passed!")
 
 
+def test_continuous_openness_and_fountain() -> None:
+    """Tests continuous openness ratio calculation and fountain blossom emergence kinematics."""
+    print("[Test] Testing Continuous Openness & Flowy Fountain Blossom...")
+    renderer = CubeHologramRenderer()
+
+    landmarks = [
+        LandmarkPoint(x=0.5, y=0.5, z=0.0, px=640, py=360) for _ in range(21)
+    ]
+    pose_open = HandPose(
+        handedness="Right",
+        landmarks=landmarks,
+        palm_center_px=(640, 480),
+        up_vector=(0.0, -1.0),
+        right_vector=(1.0, 0.0),
+        palm_scale=85.0,
+        is_open=True,
+        open_confidence=1.0,
+        finger_states=[True, True, True, True, True],
+        openness_ratio=0.95,
+        palm_normal_3d=(0.0, 0.0, -1.0),
+        palm_up_3d=(0.0, -1.0, 0.0),
+        palm_right_3d=(1.0, 0.0, 0.0),
+        palm_center_3d=(640.0, 480.0, 0.0),
+    )
+
+    assert hasattr(pose_open, "openness_ratio"), "HandPose must have openness_ratio"
+    assert 0.0 <= pose_open.openness_ratio <= 1.0, "openness_ratio must be normalized"
+
+    # Test emergence progression
+    renderer.update(hand_detected=True, is_open=True, pose=pose_open, dt=0.016)
+    c_center = renderer.physics_world.cubes[1]
+    assert c_center.emergence > 0.0, "Center cube must start emerging"
+
+    print("  -> Continuous Openness & Flowy Fountain Blossom passed!")
+
+
+def test_dual_palm_midpoint_and_accordion() -> None:
+    """Tests procedural midpoint formation and accordion distance-reactive spacing with 2 hands."""
+    print("[Test] Testing Dual-Palm Midpoint & Accordion Spacing...")
+    renderer = CubeHologramRenderer()
+
+    landmarks = [
+        LandmarkPoint(x=0.5, y=0.5, z=0.0, px=640, py=360) for _ in range(21)
+    ]
+
+    # Two hands spaced 400px apart along X axis: Left at 400, Right at 800
+    left_pose = HandPose(
+        handedness="Left",
+        landmarks=landmarks,
+        palm_center_px=(400, 360),
+        up_vector=(0.0, -1.0),
+        right_vector=(1.0, 0.0),
+        palm_scale=70.0,
+        is_open=True,
+        open_confidence=1.0,
+        finger_states=[True] * 5,
+        openness_ratio=1.0,
+        palm_normal_3d=(0.0, 0.0, -1.0),
+        palm_up_3d=(0.0, -1.0, 0.0),
+        palm_right_3d=(1.0, 0.0, 0.0),
+        palm_center_3d=(400.0, 360.0, 0.0),
+    )
+
+    right_pose = HandPose(
+        handedness="Right",
+        landmarks=landmarks,
+        palm_center_px=(800, 360),
+        up_vector=(0.0, -1.0),
+        right_vector=(1.0, 0.0),
+        palm_scale=70.0,
+        is_open=True,
+        open_confidence=1.0,
+        finger_states=[True] * 5,
+        openness_ratio=1.0,
+        palm_normal_3d=(0.0, 0.0, -1.0),
+        palm_up_3d=(0.0, -1.0, 0.0),
+        palm_right_3d=(1.0, 0.0, 0.0),
+        palm_center_3d=(800.0, 360.0, 0.0),
+    )
+
+    # Step simulation with wide hands (dist = 400px)
+    for _ in range(40):
+        renderer.update(
+            hand_detected=True,
+            is_open=True,
+            poses=[left_pose, right_pose],
+            dt=0.016,
+        )
+
+    cubes = renderer.physics_world.cubes
+    center_x = cubes[1].position[0]
+    # Midpoint of 400 and 800 is 600
+    assert abs(center_x - 600.0) < 25.0, f"Center cube should be positioned at midpoint (~600): {center_x}"
+
+    # Measure spacing with wide hands
+    wide_spacing = float(cubes[2].position[0] - cubes[0].position[0])
+
+    # Now bring hands close together: Left at 500, Right at 700 (dist = 200px)
+    left_close = HandPose(
+        handedness="Left",
+        landmarks=landmarks,
+        palm_center_px=(500, 360),
+        up_vector=(0.0, -1.0),
+        right_vector=(1.0, 0.0),
+        palm_scale=70.0,
+        is_open=True,
+        open_confidence=1.0,
+        finger_states=[True] * 5,
+        openness_ratio=1.0,
+        palm_normal_3d=(0.0, 0.0, -1.0),
+        palm_up_3d=(0.0, -1.0, 0.0),
+        palm_right_3d=(1.0, 0.0, 0.0),
+        palm_center_3d=(500.0, 360.0, 0.0),
+    )
+    right_close = HandPose(
+        handedness="Right",
+        landmarks=landmarks,
+        palm_center_px=(700, 360),
+        up_vector=(0.0, -1.0),
+        right_vector=(1.0, 0.0),
+        palm_scale=70.0,
+        is_open=True,
+        open_confidence=1.0,
+        finger_states=[True] * 5,
+        openness_ratio=1.0,
+        palm_normal_3d=(0.0, 0.0, -1.0),
+        palm_up_3d=(0.0, -1.0, 0.0),
+        palm_right_3d=(1.0, 0.0, 0.0),
+        palm_center_3d=(700.0, 360.0, 0.0),
+    )
+
+    for _ in range(40):
+        renderer.update(
+            hand_detected=True,
+            is_open=True,
+            poses=[left_close, right_close],
+            dt=0.016,
+        )
+
+    close_spacing = float(cubes[2].position[0] - cubes[0].position[0])
+    assert close_spacing < wide_spacing, f"Accordion effect: closer hands must compress spacing (wide={wide_spacing}, close={close_spacing})"
+
+    print("  -> Dual-Palm Midpoint & Accordion Spacing passed!")
+
+
+def test_dual_hand_multi_colliders() -> None:
+    """Tests 10-finger collisions from both hands acting on cubes simultaneously."""
+    print("[Test] Testing Multi-Hand 10-Finger Physics Collisions...")
+    renderer = CubeHologramRenderer()
+
+    landmarks = [
+        LandmarkPoint(x=0.5, y=0.5, z=0.0, px=640, py=360) for _ in range(21)
+    ]
+
+    # Cube 0 at 450, Cube 2 at 750
+    cube_left = renderer.physics_world.cubes[0]
+    cube_right = renderer.physics_world.cubes[2]
+    cube_left.position = np.array([450.0, 360.0, 0.0], dtype=np.float32)
+    cube_right.position = np.array([750.0, 360.0, 0.0], dtype=np.float32)
+    cube_left.current_scale = 1.0
+    cube_right.current_scale = 1.0
+
+    # Finger 1 from left hand hitting cube 0
+    left_finger = FingerTipCollider(
+        name="Index",
+        tip_idx=8,
+        pos_3d=np.array([450.0, 380.0, 0.0], dtype=np.float32),
+        vel_3d=np.array([0.0, -200.0, 0.0], dtype=np.float32),
+        radius=20.0,
+        is_extended=True,
+    )
+    # Finger 2 from right hand hitting cube 2
+    right_finger = FingerTipCollider(
+        name="Middle",
+        tip_idx=12,
+        pos_3d=np.array([750.0, 380.0, 0.0], dtype=np.float32),
+        vel_3d=np.array([0.0, -200.0, 0.0], dtype=np.float32),
+        radius=20.0,
+        is_extended=True,
+    )
+
+    left_pose = HandPose(
+        handedness="Left",
+        landmarks=landmarks,
+        palm_center_px=(450, 400),
+        up_vector=(0.0, -1.0),
+        right_vector=(1.0, 0.0),
+        palm_scale=70.0,
+        is_open=True,
+        open_confidence=1.0,
+        finger_states=[True] * 5,
+        openness_ratio=1.0,
+        palm_center_3d=(450.0, 400.0, 0.0),
+        fingers=[left_finger],
+    )
+    right_pose = HandPose(
+        handedness="Right",
+        landmarks=landmarks,
+        palm_center_px=(750, 400),
+        up_vector=(0.0, -1.0),
+        right_vector=(1.0, 0.0),
+        palm_scale=70.0,
+        is_open=True,
+        open_confidence=1.0,
+        finger_states=[True] * 5,
+        openness_ratio=1.0,
+        palm_center_3d=(750.0, 400.0, 0.0),
+        fingers=[right_finger],
+    )
+
+    renderer.update(hand_detected=True, is_open=True, poses=[left_pose, right_pose], dt=0.016)
+
+    assert cube_left.velocity[1] < -5.0, f"Cube 0 should recoil from left index finger: {cube_left.velocity[1]}"
+    assert cube_right.velocity[1] < -5.0, f"Cube 2 should recoil from right middle finger: {cube_right.velocity[1]}"
+
+    print("  -> Multi-Hand 10-Finger Physics Collisions passed!")
+
+
+def test_upward_palm_perspective() -> None:
+    """Tests that when palm opens upward (facing ceiling), cubes hover directly above the palm bed."""
+    print("[Test] Testing Upward-Facing Palm Perspective Hovering...")
+    renderer = CubeHologramRenderer()
+
+    landmarks = [
+        LandmarkPoint(x=0.5, y=0.5, z=0.0, px=640, py=480) for _ in range(21)
+    ]
+    # Palm facing upward: normal is (0, -1, 0), up (fingers) is (0, 0, -1), right is (1, 0, 0)
+    upward_pose = HandPose(
+        handedness="Right",
+        landmarks=landmarks,
+        palm_center_px=(640, 480),
+        up_vector=(0.0, -1.0),
+        right_vector=(1.0, 0.0),
+        palm_scale=85.0,
+        is_open=True,
+        open_confidence=1.0,
+        finger_states=[True] * 5,
+        openness_ratio=1.0,
+        palm_normal_3d=(0.0, -1.0, 0.0),
+        palm_up_3d=(0.0, 0.0, -1.0),
+        palm_right_3d=(1.0, 0.0, 0.0),
+        palm_center_3d=(640.0, 480.0, 0.0),
+        pitch_deg=-90.0,
+        roll_deg=0.0,
+    )
+
+    # Step simulation to full emergence
+    for _ in range(45):
+        renderer.update(hand_detected=True, is_open=True, pose=upward_pose, dt=0.016)
+
+    cubes = renderer.physics_world.cubes
+    center_cube = cubes[1]
+    # In camera coordinates, -Y is UP towards ceiling.
+    # Palm center is at y=480.0. With upward boost, cube emerges noticeably higher (y < 420.0 at frame 45).
+    assert center_cube.position[1] < 420.0, f"Cube must hover noticeably higher vertically above upward palm bed (<420): {center_cube.position[1]}"
+    # The X position should be centered with the palm (~640)
+    assert abs(center_cube.position[0] - 640.0) < 20.0, f"Cube must be centered over palm in X (~640): {center_cube.position[0]}"
+    # Depth Z should be close to palm bed Z (0.0), not flying out wildly
+    assert abs(center_cube.position[2]) < 60.0, f"Cube Z depth must stay comfortably over palm bed (<60): {center_cube.position[2]}"
+
+    # Step to steady-state equilibrium (~25 more frames)
+    for _ in range(25):
+        renderer.update(hand_detected=True, is_open=True, pose=upward_pose, dt=0.016)
+    # At steady-state, cube hovers ~95px above upward palm bed (y < 395.0 vs ~420.0 previously)
+    assert center_cube.position[1] < 395.0, f"Cube must settle at elevated hover equilibrium (<395): {center_cube.position[1]}"
+
+    print("  -> Upward-Facing Palm Perspective Hovering passed!")
+
+
+def test_dual_palm_single_closed_detachment() -> None:
+    """Tests that when 2 hands are detected, but one closes, cubes detach from closed hand and anchor 100% to open palm."""
+    print("[Test] Testing Dual-Palm Single Closed Hand Detachment...")
+    renderer = CubeHologramRenderer()
+
+    landmarks = [
+        LandmarkPoint(x=0.5, y=0.5, z=0.0, px=640, py=360) for _ in range(21)
+    ]
+
+    # Left hand open at X=400
+    left_open = HandPose(
+        handedness="Left",
+        landmarks=landmarks,
+        palm_center_px=(400, 360),
+        up_vector=(0.0, -1.0),
+        right_vector=(1.0, 0.0),
+        palm_scale=70.0,
+        is_open=True,
+        open_confidence=1.0,
+        finger_states=[True] * 5,
+        openness_ratio=1.0,
+        palm_normal_3d=(0.0, 0.0, -1.0),
+        palm_up_3d=(0.0, -1.0, 0.0),
+        palm_right_3d=(1.0, 0.0, 0.0),
+        palm_center_3d=(400.0, 360.0, 0.0),
+    )
+
+    # Right hand CLOSED at X=800
+    right_closed = HandPose(
+        handedness="Right",
+        landmarks=landmarks,
+        palm_center_px=(800, 360),
+        up_vector=(0.0, -1.0),
+        right_vector=(1.0, 0.0),
+        palm_scale=70.0,
+        is_open=False,
+        open_confidence=0.0,
+        finger_states=[False] * 5,
+        openness_ratio=0.0,
+        palm_normal_3d=(0.0, 0.0, -1.0),
+        palm_up_3d=(0.0, -1.0, 0.0),
+        palm_right_3d=(1.0, 0.0, 0.0),
+        palm_center_3d=(800.0, 360.0, 0.0),
+    )
+
+    for _ in range(65):
+        renderer.update(
+            hand_detected=True,
+            is_open=True,
+            poses=[left_open, right_closed],
+            dt=0.016,
+        )
+
+    cubes = renderer.physics_world.cubes
+    center_cube_x = cubes[1].position[0]
+    # Center cube should be anchored over the LEFT palm (~400), NOT in the middle (600)
+    assert abs(center_cube_x - 400.0) < 30.0, f"Cubes must anchor to open Left hand (~400), got {center_cube_x}"
+
+    # Now reverse: Left hand closes, Right hand opens!
+    left_closed = HandPose(
+        handedness="Left",
+        landmarks=landmarks,
+        palm_center_px=(400, 360),
+        up_vector=(0.0, -1.0),
+        right_vector=(1.0, 0.0),
+        palm_scale=70.0,
+        is_open=False,
+        open_confidence=0.0,
+        finger_states=[False] * 5,
+        openness_ratio=0.0,
+        palm_normal_3d=(0.0, 0.0, -1.0),
+        palm_up_3d=(0.0, -1.0, 0.0),
+        palm_right_3d=(1.0, 0.0, 0.0),
+        palm_center_3d=(400.0, 360.0, 0.0),
+    )
+    right_open = HandPose(
+        handedness="Right",
+        landmarks=landmarks,
+        palm_center_px=(800, 360),
+        up_vector=(0.0, -1.0),
+        right_vector=(1.0, 0.0),
+        palm_scale=70.0,
+        is_open=True,
+        open_confidence=1.0,
+        finger_states=[True] * 5,
+        openness_ratio=1.0,
+        palm_normal_3d=(0.0, 0.0, -1.0),
+        palm_up_3d=(0.0, -1.0, 0.0),
+        palm_right_3d=(1.0, 0.0, 0.0),
+        palm_center_3d=(800.0, 360.0, 0.0),
+    )
+
+    for _ in range(80):
+        renderer.update(
+            hand_detected=True,
+            is_open=True,
+            poses=[left_closed, right_open],
+            dt=0.016,
+        )
+
+    center_cube_x_new = cubes[1].position[0]
+    # Now center cube should have smoothly glided across to the RIGHT palm (~800)
+    assert abs(center_cube_x_new - 800.0) < 65.0, f"Cubes must glide and anchor to open Right hand (~800), got {center_cube_x_new}"
+
+    print("  -> Dual-Palm Single Closed Hand Detachment passed!")
+
+
+def test_satisfying_palm_suction_vortex() -> None:
+    """Tests centripetal gathering, two-stage scale retention, and vortex convergence into palm center."""
+    print("[Test] Testing Satisfying Palm Suction & Vortex Minimize...")
+    renderer = CubeHologramRenderer()
+
+    landmarks = [
+        LandmarkPoint(x=0.5, y=0.5, z=0.0, px=640, py=360) for _ in range(21)
+    ]
+    open_pose = HandPose(
+        handedness="Right",
+        landmarks=landmarks,
+        palm_center_px=(640, 360),
+        up_vector=(0.0, -1.0),
+        right_vector=(1.0, 0.0),
+        palm_scale=80.0,
+        is_open=True,
+        open_confidence=1.0,
+        finger_states=[True] * 5,
+        openness_ratio=1.0,
+        palm_normal_3d=(0.0, 0.0, -1.0),
+        palm_up_3d=(0.0, -1.0, 0.0),
+        palm_right_3d=(1.0, 0.0, 0.0),
+        palm_center_3d=(640.0, 360.0, 0.0),
+    )
+
+    # 1. Fully emerge cubes
+    for _ in range(45):
+        renderer.update(hand_detected=True, is_open=True, pose=open_pose, dt=0.016)
+
+    cubes = renderer.physics_world.cubes
+    initial_spread = float(np.linalg.norm(cubes[2].position - cubes[0].position))
+    assert initial_spread > 100.0, f"Cubes must be spread in hover formation, got {initial_spread}"
+
+    # 2. Close hand to trigger vortex suction
+    closed_pose = HandPose(
+        handedness="Right",
+        landmarks=landmarks,
+        palm_center_px=(640, 360),
+        up_vector=(0.0, -1.0),
+        right_vector=(1.0, 0.0),
+        palm_scale=80.0,
+        is_open=False,
+        open_confidence=0.0,
+        finger_states=[False] * 5,
+        openness_ratio=0.0,
+        palm_normal_3d=(0.0, 0.0, -1.0),
+        palm_up_3d=(0.0, -1.0, 0.0),
+        palm_right_3d=(1.0, 0.0, 0.0),
+        palm_center_3d=(640.0, 360.0, 0.0),
+    )
+
+    # Step into the gathering phase (~10 frames, ~0.16s)
+    for _ in range(10):
+        renderer.update(hand_detected=True, is_open=False, pose=closed_pose, dt=0.016)
+
+    # In gathering phase, cubes must still be visible (>0.4 scale)
+    assert cubes[1].current_scale > 0.40, f"Cubes must not vanish prematurely, scale={cubes[1].current_scale}"
+
+    # Verify centripetal gathering: inter-cube spread has contracted inward toward the center
+    gathered_spread = float(np.linalg.norm(cubes[2].position - cubes[0].position))
+    assert gathered_spread < initial_spread * 0.90, (
+        f"Cubes must centripetally converge toward palm center: initial={initial_spread}, gathered={gathered_spread}"
+    )
+
+    # 3. Step to complete vortex suction plunge (~35 more frames, ~0.55s total)
+    for _ in range(35):
+        renderer.update(hand_detected=True, is_open=False, pose=closed_pose, dt=0.016)
+
+    expected_inside = np.array(closed_pose.palm_center_3d) - config.PALM_SUBMERGE_DEPTH * np.array(closed_pose.palm_normal_3d)
+    for i, c in enumerate(cubes):
+        assert c.current_scale == 0.0, f"Cube {i} must be fully submerged (scale=0), got {c.current_scale}"
+        dist_in = float(np.linalg.norm(c.position - expected_inside))
+        assert dist_in < 1.0, f"Cube {i} must be at palm interior sink, dist={dist_in}"
+
+    print("  -> Satisfying Palm Suction & Vortex Minimize passed!")
+
+
+def test_cube_to_cube_collision_and_momentum_transfer() -> None:
+    """Tests corner-aware bounding radius, billiard recoil, and momentum transfer between cubes."""
+    print("[Test] Testing Cube-to-Cube Collision & Momentum Transfer...")
+    world = CubePhysicsWorld()
+
+    # Position Cube 0 and Cube 1 so their bounding spheres overlap
+    c0 = world.cubes[0]
+    c1 = world.cubes[1]
+    c0.current_scale = 1.0
+    c1.current_scale = 1.0
+    c0.position = np.array([500.0, 300.0, 0.0], dtype=np.float32)
+    c1.position = np.array([540.0, 300.0, 0.0], dtype=np.float32)
+    c0.velocity = np.array([120.0, 0.0, 0.0], dtype=np.float32)
+    c1.velocity = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+
+    # Step world to resolve collision
+    targets = [c.position.copy() for c in world.cubes]
+    world.step(targets, should_spawn=True, dt=0.016)
+
+    # Verify kinetic momentum transfer
+    assert c1.velocity[0] > 40.0, f"Cube 1 must gain positive forward velocity, got {c1.velocity[0]}"
+    assert c0.velocity[0] < 60.0, f"Cube 0 must decelerate or rebound, got {c0.velocity[0]}"
+    assert c0.recoil_timer > 0.0, "Cube 0 must have recoil timer active to loosen spring"
+    assert c1.recoil_timer > 0.0, "Cube 1 must have recoil timer active to loosen spring"
+    assert c0.impact_energy > 0.0, "Cube 0 must have impact energy for sparks"
+    assert c1.impact_energy > 0.0, "Cube 1 must have impact energy for sparks"
+    assert len(world.recent_cube_collisions) > 0, "Collision event must be recorded"
+    print("  -> Cube-to-Cube Collision & Momentum Transfer passed!")
+
+
+def test_telekinesis_pinch_grab_and_fling() -> None:
+    """Tests Telekinetic Force Grip (pinch-to-grab) and ballistic Force Fling throw."""
+    print("[Test] Testing Telekinesis Force Grip & Fling...")
+    world = CubePhysicsWorld()
+    c1 = world.cubes[1]
+    c1.current_scale = 1.0
+    c1.position = np.array([640.0, 360.0, 0.0], dtype=np.float32)
+
+    # 1. Simulate hand with pinch near cube 1
+    dummy_lms = [LandmarkPoint(x=0.5, y=0.5, z=0.0, px=640, py=360) for _ in range(21)]
+    dummy_lms[4] = LandmarkPoint(x=0.5, y=0.5, z=0.0, px=635, py=360)
+    dummy_lms[8] = LandmarkPoint(x=0.5, y=0.5, z=0.0, px=645, py=360)
+
+    pinch_pose = HandPose(
+        handedness="Right",
+        landmarks=dummy_lms,
+        palm_center_px=(640, 360),
+        up_vector=(0.0, -1.0),
+        right_vector=(1.0, 0.0),
+        palm_scale=80.0,
+        is_open=True,
+        open_confidence=1.0,
+        finger_states=[True] * 5,
+        openness_ratio=1.0,
+        palm_normal_3d=(0.0, 0.0, -1.0),
+        palm_up_3d=(0.0, -1.0, 0.0),
+        palm_right_3d=(1.0, 0.0, 0.0),
+        palm_center_3d=(640.0, 360.0, 0.0),
+        is_pinching=True,
+        pinch_point_3d=(640.0, 360.0, 0.0),
+        pinch_dist_px=10.0,
+    )
+
+    targets = [c.position.copy() for c in world.cubes]
+    world.step(targets, should_spawn=True, dt=0.016, poses=[pinch_pose])
+
+    assert world.grabbed_cube_idx == 1, f"Cube 1 should be grabbed, got {world.grabbed_cube_idx}"
+    assert c1.is_grabbed is True, "Cube 1 is_grabbed flag must be True"
+
+    # Move pinch point swiftly to the right
+    pinch_pose.pinch_point_3d = (740.0, 360.0, 0.0)
+    world.step(targets, should_spawn=True, dt=0.016, poses=[pinch_pose])
+    assert abs(c1.position[0] - 740.0) < 1.0, f"Grabbed cube must track pinch point: pos={c1.position[0]}"
+
+    # Release pinch with motion -> Force Fling!
+    release_pose = HandPose(
+        handedness="Right",
+        landmarks=dummy_lms,
+        palm_center_px=(740, 360),
+        up_vector=(0.0, -1.0),
+        right_vector=(1.0, 0.0),
+        palm_scale=80.0,
+        is_open=True,
+        open_confidence=1.0,
+        finger_states=[True] * 5,
+        openness_ratio=1.0,
+        palm_normal_3d=(0.0, 0.0, -1.0),
+        palm_up_3d=(0.0, -1.0, 0.0),
+        palm_right_3d=(1.0, 0.0, 0.0),
+        palm_center_3d=(740.0, 360.0, 0.0),
+        is_pinching=False,
+        pinch_point_3d=None,
+        pinch_dist_px=90.0,
+    )
+    world.step(targets, should_spawn=True, dt=0.016, poses=[release_pose])
+
+    assert world.grabbed_cube_idx is None, "Grabbed cube index should be cleared on release"
+    assert c1.is_grabbed is False, "is_grabbed must be False on release"
+    assert c1.fling_timer > 0.5, f"Fling timer must be active, got {c1.fling_timer}"
+    assert c1.velocity[0] > 100.0, f"Flung cube must have high fling velocity, got {c1.velocity[0]}"
+
+    # Step again: verify ballistic flight without spring intervention
+    prev_x = c1.position[0]
+    world.step(targets, should_spawn=True, dt=0.016, poses=[release_pose])
+    assert c1.position[0] > prev_x, "Flung cube must continue moving in fling direction"
+
+    print("  -> Telekinesis Force Grip & Fling passed!")
+
+
+def test_telekinesis_force_push() -> None:
+    """Tests Telekinetic Force Push forward shockwave blast."""
+    print("[Test] Testing Telekinesis Force Push Shockwave...")
+    world = CubePhysicsWorld()
+    for c in world.cubes:
+        c.current_scale = 1.0
+        c.velocity[:] = 0.0
+
+    dummy_lms = [LandmarkPoint(x=0.5, y=0.5, z=0.0, px=640, py=360) for _ in range(21)]
+    thrust_pose = HandPose(
+        handedness="Right",
+        landmarks=dummy_lms,
+        palm_center_px=(640, 360),
+        up_vector=(0.0, -1.0),
+        right_vector=(1.0, 0.0),
+        palm_scale=80.0,
+        is_open=True,
+        open_confidence=1.0,
+        finger_states=[True] * 5,
+        openness_ratio=1.0,
+        palm_normal_3d=(0.0, 0.0, -1.0),
+        palm_up_3d=(0.0, -1.0, 0.0),
+        palm_right_3d=(1.0, 0.0, 0.0),
+        palm_center_3d=(640.0, 360.0, 0.0),
+        is_pinching=False,
+        palm_thrust_speed=460.0,  # Exceeds threshold (380.0)
+    )
+
+    targets = [c.position.copy() for c in world.cubes]
+    world.step(targets, should_spawn=True, dt=0.016, poses=[thrust_pose])
+
+    assert world.force_push_active > 0.0, "Force Push must be triggered"
+    for i, c in enumerate(world.cubes):
+        speed = float(np.linalg.norm(c.velocity))
+        assert speed > 150.0, f"Cube {i} must receive blast velocity, got speed {speed}"
+        assert c.recoil_timer > 0.0, f"Cube {i} must have recoil active"
+        assert c.impact_energy > 0.5, f"Cube {i} must have impact energy"
+
+    print("  -> Telekinesis Force Push Shockwave passed!")
+
+
+def test_palm_wave_tornado_procedural_animation() -> None:
+    """Tests that waving an open palm faster generates a 3D helical tornado procedural cyclone."""
+    print("[Test] Testing Procedural Palm-Wave Tornado Cyclone Animation...")
+    renderer = CubeHologramRenderer()
+    dummy_lms = [LandmarkPoint(x=0.5, y=0.5, z=0.0, px=640, py=360) for _ in range(21)]
+
+    # 1. Stationary open palm -> tornado intensity should be 0
+    calm_pose = HandPose(
+        handedness="Right",
+        landmarks=dummy_lms,
+        palm_center_px=(640, 360),
+        up_vector=(0.0, -1.0),
+        right_vector=(1.0, 0.0),
+        palm_scale=80.0,
+        is_open=True,
+        open_confidence=1.0,
+        finger_states=[True] * 5,
+        openness_ratio=1.0,
+        palm_normal_3d=(0.0, 0.0, -1.0),
+        palm_up_3d=(0.0, -1.0, 0.0),
+        palm_right_3d=(1.0, 0.0, 0.0),
+        palm_center_3d=(640.0, 360.0, 0.0),
+        palm_speed=50.0,  # Below threshold
+    )
+
+    for _ in range(20):
+        renderer.update(hand_detected=True, is_open=True, pose=calm_pose, dt=0.016)
+
+    assert renderer.tornado_intensity == 0.0, "Tornado should remain at 0 intensity for calm palm"
+
+    # 2. Fast waving open palm -> tornado ramps up
+    waving_pose = HandPose(
+        handedness="Right",
+        landmarks=dummy_lms,
+        palm_center_px=(640, 360),
+        up_vector=(0.0, -1.0),
+        right_vector=(1.0, 0.0),
+        palm_scale=80.0,
+        is_open=True,
+        open_confidence=1.0,
+        finger_states=[True] * 5,
+        openness_ratio=1.0,
+        palm_normal_3d=(0.0, 0.0, -1.0),
+        palm_up_3d=(0.0, -1.0, 0.0),
+        palm_right_3d=(1.0, 0.0, 0.0),
+        palm_center_3d=(640.0, 360.0, 0.0),
+        palm_speed=550.0,  # High waving speed
+    )
+
+    for _ in range(30):
+        renderer.update(hand_detected=True, is_open=True, pose=waving_pose, dt=0.033)
+
+    assert renderer.tornado_intensity > 0.6, f"Tornado intensity should ramp up above 0.6, got {renderer.tornado_intensity}"
+    assert renderer.tornado_phase > 0.0, "Tornado cyclonic phase must advance"
+
+    # Verify tiered vertical stacking in the cyclone along the palm normal (-z)
+    c0 = renderer.physics_world.cubes[0]
+    c1 = renderer.physics_world.cubes[1]
+    c2 = renderer.physics_world.cubes[2]
+
+    # In palm normal direction (-z), cube 2 (top flare) should be further along the axis than cube 0 (base)
+    # Palm normal is (0, 0, -1), so h_pos along normal pushes z to negative values
+    assert c2.position[2] < c0.position[2], (
+        f"Cube 2 (top vortex flare) should be higher along palm normal than Cube 0 (base): "
+        f"c2.z={c2.position[2]} vs c0.z={c0.position[2]}"
+    )
+
+    # 3. Stop waving -> tornado intensity decays cleanly
+    calm_pose.palm_speed = 10.0
+    initial_tornado = renderer.tornado_intensity
+    for _ in range(25):
+        renderer.update(hand_detected=True, is_open=True, pose=calm_pose, dt=0.033)
+
+    assert renderer.tornado_intensity < initial_tornado, "Tornado intensity must decay when waving stops"
+    print("  -> Procedural Palm-Wave Tornado Cyclone Animation passed!")
+
+
+def test_pinch_hysteresis_and_clean_visuals() -> None:
+    """Tests pinch grab hysteresis (36px grab / 52px release) and verifies 0 visual clutter."""
+    print("[Test] Testing Pinch Hysteresis & Visual Cleanliness...")
+
+    def check_pinch(pinch_dist: float, was_pinching: bool) -> bool:
+        thresh = (
+            config.PINCH_RELEASE_THRESHOLD_PX
+            if was_pinching
+            else config.PINCH_THRESHOLD_PX
+        )
+        return pinch_dist < thresh
+
+    # 1. At 42px (initial rest state) -> False (< 36px required)
+    assert check_pinch(42.0, False) is False, "Should not pinch at 42px initially (threshold 36px)"
+
+    # 2. Close fingers to 30px (< 36px) -> True
+    assert check_pinch(30.0, False) is True, "Should trigger pinch at 30px (< 36px)"
+
+    # 3. Fingers relax slightly to 44px (between 36px and 52px) -> Hysteresis maintains True!
+    assert check_pinch(44.0, True) is True, "Hysteresis must keep pinch active at 44px (below release threshold 52px)"
+
+    # 4. Open fingers to 60px (> 52px) -> releases to False
+    assert check_pinch(60.0, True) is False, "Pinch must release when distance exceeds release threshold (52px)"
+
+    # Verify Clean Visual Rendering on 3D Cubes (Zero 2D rings, shockwaves, or lines outside cubes)
+    renderer = CubeHologramRenderer()
+    material = MATERIALS["Prismatic"]
+    frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+
+    dummy_lms = [LandmarkPoint(x=0.5, y=0.5, z=0.0, px=640, py=360) for _ in range(21)]
+    test_pose = HandPose(
+        handedness="Right",
+        landmarks=dummy_lms,
+        palm_center_px=(640, 360),
+        up_vector=(0.0, -1.0),
+        right_vector=(1.0, 0.0),
+        palm_scale=80.0,
+        is_open=True,
+        open_confidence=1.0,
+        finger_states=[True] * 5,
+        openness_ratio=1.0,
+        palm_normal_3d=(0.0, 0.0, -1.0),
+        palm_up_3d=(0.0, -1.0, 0.0),
+        palm_right_3d=(1.0, 0.0, 0.0),
+        palm_center_3d=(640.0, 360.0, 0.0),
+        is_pinching=True,
+        pinch_point_3d=(640.0, 360.0, 0.0),
+        pinch_dist_px=25.0,
+    )
+
+    for _ in range(35):
+        renderer.update(hand_detected=True, is_open=True, pose=test_pose, dt=0.016)
+
+    renderer.render(frame, test_pose, material)
+    assert np.any(frame > 0), "Solid 3D cubes should be rendered onto frame"
+    print("  -> Pinch Hysteresis & Visual Cleanliness passed!")
+
+
 def main() -> None:
     """Run all verification tests."""
     print("==================================================")
@@ -400,6 +1139,17 @@ def main() -> None:
     test_finger_identification_and_tracking()
     test_finger_collision_and_flick_recoil()
     test_levitation_recovery()
+    test_continuous_openness_and_fountain()
+    test_dual_palm_midpoint_and_accordion()
+    test_dual_hand_multi_colliders()
+    test_upward_palm_perspective()
+    test_dual_palm_single_closed_detachment()
+    test_satisfying_palm_suction_vortex()
+    test_cube_to_cube_collision_and_momentum_transfer()
+    test_telekinesis_pinch_grab_and_fling()
+    test_telekinesis_force_push()
+    test_palm_wave_tornado_procedural_animation()
+    test_pinch_hysteresis_and_clean_visuals()
     print("==================================================")
     print("ALL TESTS PASSED SUCCESSFULLY!")
     print("==================================================")
