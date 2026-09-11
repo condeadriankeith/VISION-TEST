@@ -17,6 +17,7 @@ from typing import Any, List, Optional, Tuple
 import cv2
 import numpy as np
 
+from spatial_math import ThinFilmInterference
 import config
 from hand_tracker import HandPose
 from physics import ContactEvent, CubePhysicsWorld, PhysicsCube
@@ -90,6 +91,13 @@ class CubeHologramRenderer:
         self.tornado_intensity: float = 0.0
         self.tornado_phase: float = 0.0
 
+        # Physical thin-film optical wave interference engine
+        self.thin_film: ThinFilmInterference = ThinFilmInterference(
+            n_film=getattr(config, "THIN_FILM_IOR", 1.45),
+            film_thickness_nm=getattr(config, "THIN_FILM_THICKNESS_NM", 520.0),
+        )
+
+
     def update(
         self,
         hand_detected: bool,
@@ -110,6 +118,9 @@ class CubeHologramRenderer:
         now = time.time()
         if dt is None:
             dt = now - self.last_update_time
+        # Clamp runaway deltas after stalls so springs/tornado can't explode;
+        # physics clamps again internally — this keeps UI envelopes stable too.
+        dt = float(np.clip(dt, 0.001, 0.05))
         self.last_update_time = now
 
         # Consolidate poses list
@@ -514,6 +525,7 @@ class CubeHologramRenderer:
         cube_idx: int,
         norm: np.ndarray,
         illumination: float,
+        prism_t: Optional[float] = None,
     ) -> Tuple[Tuple[int, int, int], Tuple[int, int, int]]:
         """Procedural prismatic face + bevel colors for the single default material.
 
@@ -521,7 +533,8 @@ class CubeHologramRenderer:
         keeps cubes distinct; slight normal-based shift adds view-dependent shimmer.
         Value rides on the existing illumination term so PBR grounding is preserved.
         """
-        prism_t = time.time() - self._prism_t0
+        if prism_t is None:
+            prism_t = time.time() - self._prism_t0
         face_hue = (
             face_idx * config.PRISM_FACE_STEP
             + cube_idx * config.PRISM_CUBE_STEP
@@ -532,6 +545,18 @@ class CubeHologramRenderer:
         val = min(1.0, 0.35 + 0.65 * illumination)
         face_bgr = self._hsv_to_bgr(face_hue, sat, val)
         bevel_bgr = self._hsv_to_bgr(face_hue, sat * 0.45, min(1.0, val + 0.22))
+
+        # Thin-Film Wave Interference physical iridescence blending
+        if getattr(config, "THIN_FILM_ENABLED", True):
+            blend = getattr(config, "THIN_FILM_BLEND", 0.55)
+            cos_i = max(0.0, -float(norm[2]))
+            thickness_mod = 1.0 + 0.14 * math.sin(face_idx * 1.05 + cube_idx * 0.75)
+            rf_b, rf_g, rf_r = self.thin_film.compute_rgb_reflectance(cos_i, thickness_mod)
+            fb_b = int((1.0 - blend) * face_bgr[0] + blend * (rf_b * val * 255.0))
+            fb_g = int((1.0 - blend) * face_bgr[1] + blend * (rf_g * val * 255.0))
+            fb_r = int((1.0 - blend) * face_bgr[2] + blend * (rf_r * val * 255.0))
+            face_bgr = (min(255, max(0, fb_b)), min(255, max(0, fb_g)), min(255, max(0, fb_r)))
+
         return face_bgr, bevel_bgr
 
     def _update_environmental_lighting(self, frame: np.ndarray) -> None:
@@ -660,6 +685,9 @@ class CubeHologramRenderer:
 
         base_size = config.CUBE_SIZE * dist_factor
 
+        # Single prism clock sample per frame (was one time.time() per face).
+        prism_t = time.time() - self._prism_t0
+
         focal_len = config.FOCAL_LENGTH
         cx_screen = w * 0.5
         cy_screen = h * 0.5
@@ -784,7 +812,7 @@ class CubeHologramRenderer:
 
                 # Prismatic procedural face color (value rides on illumination)
                 (b_prism, g_prism, r_prism), (b_bev, g_bev, r_bev) = self._prismatic_face_colors(
-                    face_idx, cube_idx, norm, illumination
+                    face_idx, cube_idx, norm, illumination, prism_t
                 )
 
                 # Add specular gleam + Fresnel rim reflection on top

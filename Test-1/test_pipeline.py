@@ -1126,6 +1126,166 @@ def test_pinch_hysteresis_and_clean_visuals() -> None:
     print("  -> Pinch Hysteresis & Visual Cleanliness passed!")
 
 
+def test_one_euro_filter() -> None:
+    """Tests 1€ Adaptive Motion Filter jitter elimination and high-speed responsiveness."""
+    print("[Test] Testing 1€ (One Euro) Adaptive Motion Filter...")
+    from spatial_math import OneEuroFilter
+
+    filt = OneEuroFilter(fc_min=0.85, beta=0.045, d_cutoff=1.0)
+
+    # 1. Stationary tremor suppression
+    np.random.seed(42)
+    dt = 0.016
+    steady_val = np.array([100.0, 200.0, -50.0], dtype=np.float32)
+    raw_samples = []
+    filt_samples = []
+
+    for _ in range(60):
+        noise = np.random.normal(0.0, 1.5, 3).astype(np.float32)
+        sample = steady_val + noise
+        raw_samples.append(sample)
+        filt_samples.append(filt.filter(sample, dt))
+
+    raw_var = float(np.var(raw_samples[10:], axis=0).mean())
+    filt_var = float(np.var(filt_samples[10:], axis=0).mean())
+    assert filt_var < raw_var * 0.25, f"1€ filter must suppress jitter by >75%: raw_var={raw_var:.3f}, filt_var={filt_var:.3f}"
+
+    # 2. Fast step transition response (low lag during fast gestures)
+    step_val = np.array([300.0, 400.0, 50.0], dtype=np.float32)
+    out_step = filt.filter(step_val, dt)
+    # Filter should adaptively open cutoff and track rapidly
+    dist_to_step = float(np.linalg.norm(step_val - out_step))
+    assert dist_to_step < 120.0, f"Filter must adaptively track fast movement without sluggish lag, dist={dist_to_step}"
+    print("  -> 1€ Adaptive Motion Filter passed!")
+
+
+def test_divergence_free_curl_noise() -> None:
+    """Tests that the 3D Curl Noise vector field satisfies div(v) == 0 (divergence-free)."""
+    print("[Test] Testing Divergence-Free 3D Curl Noise Vector Field...")
+    from spatial_math import CurlNoise3D
+
+    curl_field = CurlNoise3D()
+    eps = 0.05
+    test_points = [
+        np.array([0.0, 0.0, 0.0], dtype=np.float32),
+        np.array([250.0, -180.0, 45.0], dtype=np.float32),
+        np.array([-120.0, 310.0, -75.0], dtype=np.float32),
+        np.array([640.0, 360.0, 20.0], dtype=np.float32),
+    ]
+
+    for pt in test_points:
+        t = 1.25
+        # Central finite difference divergence approximation
+        vx_p = curl_field.evaluate(pt + np.array([eps, 0.0, 0.0]), t)[0]
+        vx_m = curl_field.evaluate(pt - np.array([eps, 0.0, 0.0]), t)[0]
+        dvx_dx = (vx_p - vx_m) / (2.0 * eps)
+
+        vy_p = curl_field.evaluate(pt + np.array([0.0, eps, 0.0]), t)[1]
+        vy_m = curl_field.evaluate(pt - np.array([0.0, eps, 0.0]), t)[1]
+        dvy_dy = (vy_p - vy_m) / (2.0 * eps)
+
+        vz_p = curl_field.evaluate(pt + np.array([0.0, 0.0, eps]), t)[2]
+        vz_m = curl_field.evaluate(pt - np.array([0.0, 0.0, eps]), t)[2]
+        dvz_dz = (vz_p - vz_m) / (2.0 * eps)
+
+        divergence = abs(float(dvx_dx + dvy_dy + dvz_dz))
+        assert divergence < 1e-3, f"Curl noise field must have zero divergence everywhere, got div={divergence} at {pt}"
+
+    print("  -> Divergence-Free 3D Curl Noise Vector Field passed!")
+
+
+def test_obb_sat_collision_queries() -> None:
+    """Tests 15-axis Separating Axis Theorem (SAT) rigid body box intersection and separation."""
+    print("[Test] Testing OBB 15-Axis Separating Axis Theorem (SAT) Collision...")
+    from spatial_math import OBB3D, OBBSATCollider
+
+    # 1. Separated boxes
+    box_a = OBB3D(
+        center=np.array([100.0, 100.0, 0.0], dtype=np.float32),
+        rotation=np.eye(3, dtype=np.float32),
+        half_extents=np.array([20.0, 20.0, 20.0], dtype=np.float32),
+    )
+    box_b = OBB3D(
+        center=np.array([160.0, 100.0, 0.0], dtype=np.float32),
+        rotation=np.eye(3, dtype=np.float32),
+        half_extents=np.array([20.0, 20.0, 20.0], dtype=np.float32),
+    )
+
+    sep_res = OBBSATCollider.test_collision(box_a, box_b)
+    assert sep_res is None, "Boxes separated by distance 60 (half-sum=40) must return None"
+
+    # 2. Intersecting boxes with angle rotation
+    theta = math.pi / 6.0  # 30 deg rotation
+    rot_z = np.array([
+        [math.cos(theta), -math.sin(theta), 0.0],
+        [math.sin(theta),  math.cos(theta), 0.0],
+        [0.0, 0.0, 1.0],
+    ], dtype=np.float32)
+
+    box_b_col = OBB3D(
+        center=np.array([130.0, 100.0, 0.0], dtype=np.float32),
+        rotation=rot_z,
+        half_extents=np.array([20.0, 20.0, 20.0], dtype=np.float32),
+    )
+
+    col_res = OBBSATCollider.test_collision(box_a, box_b_col)
+    assert col_res is not None, "Intersecting rotated OBBs must report collision"
+    assert col_res.intersecting is True, "Must report intersecting"
+    assert col_res.penetration > 0.0, f"Penetration must be positive, got {col_res.penetration}"
+    assert abs(float(np.linalg.norm(col_res.contact_normal)) - 1.0) < 1e-4, "Contact normal must be unit vector"
+    print("  -> OBB 15-Axis SAT Collision passed!")
+
+
+def test_bone_capsule_skeletal_colliders() -> None:
+    """Tests swept-sphere bone capsule geometry and collision impulse projection."""
+    print("[Test] Testing Biomechanical Bone Capsule Colliders...")
+    from spatial_math import BoneCapsuleCollider
+
+    capsule = BoneCapsuleCollider(
+        name="Index_Proximal",
+        p0=np.array([100.0, 200.0, 0.0], dtype=np.float32),
+        p1=np.array([100.0, 260.0, 0.0], dtype=np.float32),
+        radius=12.0,
+        velocity=np.array([0.0, 50.0, 0.0], dtype=np.float32),
+    )
+
+    # Test closest point to segment midpoint
+    test_pt = np.array([115.0, 230.0, 0.0], dtype=np.float32)
+    closest, t = capsule.closest_point_to_point(test_pt)
+    assert abs(closest[0] - 100.0) < 1e-4 and abs(closest[1] - 230.0) < 1e-4, f"Closest point mismatch: {closest}"
+    assert abs(t - 0.5) < 1e-4, f"t should be 0.5, got {t}"
+
+    # Test sphere collision
+    sphere_center = np.array([118.0, 230.0, 0.0], dtype=np.float32)
+    col = capsule.test_sphere_collision(sphere_center, sphere_radius=15.0)
+    assert col is not None, "Sphere overlapping capsule radius must collide"
+    norm, overlap, contact_pt = col
+    assert overlap > 0.0, f"Overlap must be positive, got {overlap}"
+    assert abs(norm[0] - 1.0) < 1e-3, f"Normal must point along +X, got {norm}"
+    print("  -> Biomechanical Bone Capsule Colliders passed!")
+
+
+def test_thin_film_optical_interference() -> None:
+    """Tests physical thin-film wave interference reflectance curves across incidence angles."""
+    print("[Test] Testing Physical Thin-Film Optical Wave Interference...")
+    from spatial_math import ThinFilmInterference
+
+    film = ThinFilmInterference(n_film=1.45, film_thickness_nm=520.0)
+
+    # Normal incidence (cos = 1.0)
+    rb_0, rg_0, rr_0 = film.compute_rgb_reflectance(1.0)
+    assert 0.0 <= rb_0 <= 1.0 and 0.0 <= rg_0 <= 1.0 and 0.0 <= rr_0 <= 1.0, "Reflectance channels must be in [0, 1]"
+
+    # Grazing incidence (cos = 0.2)
+    rb_g, rg_g, rr_g = film.compute_rgb_reflectance(0.2)
+    assert 0.0 <= rb_g <= 1.0 and 0.0 <= rg_g <= 1.0 and 0.0 <= rr_g <= 1.0, "Grazing reflectance must be in [0, 1]"
+
+    # Angle change should cause spectral dispersion / phase shift
+    diff = abs(rb_0 - rb_g) + abs(rg_0 - rg_g) + abs(rr_0 - rr_g)
+    assert diff > 0.05, f"Angle change must produce measurable thin-film color shift, diff={diff}"
+    print("  -> Physical Thin-Film Optical Wave Interference passed!")
+
+
 def main() -> None:
     """Run all verification tests."""
     print("==================================================")
@@ -1150,6 +1310,12 @@ def main() -> None:
     test_telekinesis_force_push()
     test_palm_wave_tornado_procedural_animation()
     test_pinch_hysteresis_and_clean_visuals()
+    # New Top-Tier Algorithmic Test Suites
+    test_one_euro_filter()
+    test_divergence_free_curl_noise()
+    test_obb_sat_collision_queries()
+    test_bone_capsule_skeletal_colliders()
+    test_thin_film_optical_interference()
     print("==================================================")
     print("ALL TESTS PASSED SUCCESSFULLY!")
     print("==================================================")

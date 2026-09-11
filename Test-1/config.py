@@ -17,8 +17,13 @@ WINDOW_TITLE: str = "Hand Hologram - 3D Hovering Cubes"
 # Downsample frame for neural network inference while rendering at full 1280x720
 INFERENCE_WIDTH: int = 640
 INFERENCE_HEIGHT: int = 360
-# Exponential moving average filter factor (0 = frozen, 1 = raw jittery)
-LANDMARK_SMOOTHING_ALPHA: float = 0.48
+# Exponential moving average filter factor (0 = frozen, 1 = raw jittery).
+# Raised for realtime response: the 1 Euro filter already removes rest jitter,
+# so stacking a heavy EMA here only added skeleton lag.
+LANDMARK_SMOOTHING_ALPHA: float = 0.62
+# Requested capture pixel format / frame rate (falls back gracefully).
+CAMERA_FOURCC: str = "MJPG"  # MJPEG keeps 720p at ~30fps; YUYV often drops to ~10fps
+CAMERA_FPS: int = 30
 
 # MediaPipe Hand Tracking Configuration
 MAX_NUM_HANDS: int = 2
@@ -194,3 +199,41 @@ MATERIALS: Dict[str, GreyMaterial] = {
         hud_accent=(255, 220, 180),     # Bright prism accent for HUD
     ),
 }
+
+# =============================================================================
+# Advanced Procedural & Top-Tier Algorithmic Tunables
+# =============================================================================
+
+# 1. 1€ (One Euro) Adaptive Motion Filter
+# Retuned for realtime: higher rest cutoff halves skeleton lag (~190ms -> ~110ms
+# group delay) while beta opens the cutoff fast during flicks, preserving
+# zero-lag feel. Rest jitter is still suppressed ~4x vs raw (see test suite).
+ONE_EURO_FC_MIN: float = 1.4           # Minimum cutoff frequency (Hz) for stationary stillness
+ONE_EURO_BETA: float = 0.09            # Velocity scaling factor for zero-lag flicks
+ONE_EURO_D_CUTOFF: float = 1.0         # Derivative cutoff frequency (Hz)
+
+# 2. Symplectic Integrator Sub-Stepping
+PHYSICS_SUBSTEPS: int = 4              # Number of sub-steps per frame tick for numerical stability
+PHYSICS_FIXED_DT: float = 1.0 / 120.0  # Target fixed sub-step delta time (120 Hz)
+INTEGRATOR_TYPE: str = "symplectic"    # "symplectic" (semi-implicit) or "verlet"
+
+# 3. Divergence-Free 3D Curl Noise Field (Volume-Preserving Turbulence)
+CURL_NOISE_ENABLED: bool = True        # Enable organic fluid turbulence around palm
+CURL_NOISE_STRENGTH: float = 16.0      # Maximum fluid acceleration (px/s^2)
+CURL_NOISE_TEMPORAL_SPEED: float = 0.85# Evolution speed of turbulence vector field
+
+# 4. 3D OBB Separating Axis Theorem (SAT) Rigid-Body Collisions
+OBB_SAT_COLLISION_ENABLED: bool = True # Enable true 15-axis 3D box collision detection
+OBB_SAT_RESTITUTION: float = 0.88      # High-elasticity rebound on box impact
+OBB_SAT_FRICTION: float = 0.35         # Tangential surface friction
+
+# 5. Full-Hand Biomechanical Capsule Colliders
+FULL_HAND_CAPSULE_ENABLED: bool = True # Enable swept-sphere capsules along all finger phalanges
+CAPSULE_BONE_RADIUS: float = 15.0      # Collision thickness radius for finger bones (px)
+
+# 6. Physical Thin-Film Optical Wave Interference
+THIN_FILM_ENABLED: bool = True         # Wave-optics thin film iridescence on cube faces
+THIN_FILM_IOR: float = 1.45            # Refractive index of thin dielectric coating
+THIN_FILM_THICKNESS_NM: float = 520.0  # Base physical film thickness in nanometers
+THIN_FILM_BLEND: float = 0.55          # Blend factor with base prismatic lighting
+

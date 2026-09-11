@@ -87,21 +87,38 @@ class CameraManager:
     """Manages active camera detection, selection, and live switching."""
 
     @staticmethod
+    def _configure_stream(cap: cv2.VideoCapture) -> None:
+        """Apply low-latency capture settings: MJPEG + resolution + fps + tiny buffer.
+
+        MJPEG is the key realtime setting: many webcams only manage ~10fps at
+        720p over raw YUYV (100ms+ sensor latency) but hit 30fps with MJPEG.
+        Every call is best-effort — unsupported values are ignored by the driver.
+        """
+        try:
+            fourcc = getattr(config, "CAMERA_FOURCC", "MJPG")
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))
+        except Exception:
+            pass
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, config.FRAME_WIDTH)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config.FRAME_HEIGHT)
+        cap.set(cv2.CAP_PROP_FPS, getattr(config, "CAMERA_FPS", 30))
+
+    @staticmethod
     def open_camera(target_index: int) -> ThreadedCamera:
         """Explicitly opens a specific camera index using DirectShow."""
         print(f"[CameraManager] Opening camera index {target_index} via DirectShow...")
         for b_name, backend in [("DirectShow", cv2.CAP_DSHOW), ("Default", cv2.CAP_ANY)]:
             cap = cv2.VideoCapture(target_index, backend)
             if cap.isOpened():
-                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, config.FRAME_WIDTH)
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config.FRAME_HEIGHT)
+                CameraManager._configure_stream(cap)
                 for _ in range(3):
                     ret, _ = cap.read()
                 ret, frame = cap.read()
                 if ret and frame is not None:
                     h, w = frame.shape[:2]
-                    print(f"[CameraManager] Successfully connected to Camera {target_index} ({w}x{h}).")
+                    fps = cap.get(cv2.CAP_PROP_FPS)
+                    print(f"[CameraManager] Successfully connected to Camera {target_index} ({w}x{h} @ {fps:.0f}fps).")
                     return ThreadedCamera(cap, target_index)
                 cap.release()
         raise RuntimeError(f"Could not open camera index {target_index}.")
@@ -130,10 +147,8 @@ class CameraManager:
                     cap.release()
                     continue
 
-                # Set zero-latency buffer size and resolution
-                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, config.FRAME_WIDTH)
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config.FRAME_HEIGHT)
+                # Set zero-latency capture settings and resolution
+                CameraManager._configure_stream(cap)
 
                 # Warmup frames
                 test_frame = None

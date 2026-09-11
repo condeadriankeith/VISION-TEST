@@ -9,6 +9,7 @@ from collections import deque
 from dataclasses import dataclass, field
 import math
 import os
+import threading
 import time
 from typing import List, Optional, Tuple
 import urllib.request
@@ -19,6 +20,7 @@ from mediapipe.tasks.python import vision
 from mediapipe.tasks.python.core.base_options import BaseOptions
 import numpy as np
 
+from spatial_math import BoneCapsuleCollider, OneEuroFilter
 import config
 
 MODEL_URL: str = (
@@ -43,8 +45,8 @@ class FingerTipCollider:
     """Identified fingertip with 3D position, smoothed velocity, and collider radius."""
     name: str              # "Thumb", "Index", "Middle", "Ring", "Pinky"
     tip_idx: int           # Landmark index (4, 8, 12, 16, 20)
-    pos_3d: np.ndarray     # 3D coordinates [x, y, z] in camera/pixel space
-    vel_3d: np.ndarray     # 3D velocity vector [vx, vy, vz] in px/sec
+    pos_3d: np.ndarray     # 3D position [x, y, z] in camera coordinate space
+    vel_3d: np.ndarray     # Dynamic 3D velocity vector (px/s)
     radius: float          # Collision radius in pixels
     is_extended: bool      # Finger extension status
 
@@ -69,6 +71,7 @@ class HandPose:
     pitch_deg: float = 0.0
     roll_deg: float = 0.0
     fingers: List[FingerTipCollider] = field(default_factory=list)
+    capsules: List[BoneCapsuleCollider] = field(default_factory=list)
     # Telekinesis Force Perception
     is_pinching: bool = False
     pinch_point_3d: Optional[Tuple[float, float, float]] = None
@@ -156,6 +159,17 @@ class HandTracker:
         # Pinch gesture hysteresis state
         self._prev_pinching: dict[str, bool] = {}
 
+        # 1€ (One Euro) Adaptive Motion Filter banks per hand
+        self._euro_landmarks: dict[str, List[OneEuroFilter]] = {}
+        self._euro_palm_center: dict[str, OneEuroFilter] = {}
+        self._euro_normal: dict[str, OneEuroFilter] = {}
+        self._euro_up_3d: dict[str, OneEuroFilter] = {}
+        self._euro_scale: dict[str, OneEuroFilter] = {}
+        self._last_process_time: dict[str, float] = {}
+        # VIDEO-mode timestamps must be strictly increasing; callers using
+        # wall-clock ms can rarely repeat a value between fast frames.
+        self._last_timestamp_ms: int = 0
+
     def _ensure_model_file(self, target_path: str) -> None:
         """Downloads the MediaPipe task model if not present locally."""
         if not os.path.exists(target_path):
@@ -168,8 +182,8 @@ class HandTracker:
     ) -> List[HandPose]:
         """Detect hands and extract virtual skeletons and gestures.
 
-        Uses downsampled inference for high FPS and applies temporal smoothing
-        to eliminate coordinate jitter.
+        Uses downsampled inference for high FPS and applies 1€ adaptive filtering
+        to eliminate coordinate jitter while preserving zero-latency response.
         """
         height, width = frame_bgr.shape[:2]
 
@@ -185,6 +199,9 @@ class HandTracker:
             frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
 
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
+        if timestamp_ms <= self._last_timestamp_ms:
+            timestamp_ms = self._last_timestamp_ms + 1
+        self._last_timestamp_ms = timestamp_ms
         result = self.detector.detect_for_video(mp_image, timestamp_ms)
         poses: List[HandPose] = []
 
@@ -204,26 +221,55 @@ class HandTracker:
             self._prev_palm_vel.clear()
             self._prev_palm_time.clear()
             self._prev_pinching.clear()
+            self._euro_landmarks.clear()
+            self._euro_palm_center.clear()
+            self._euro_normal.clear()
+            self._euro_up_3d.clear()
+            self._euro_scale.clear()
+            self._last_process_time.clear()
             return poses
+
+        now_sec = float(timestamp_ms * 0.001)
 
         for i, raw_landmarks in enumerate(result.hand_landmarks):
             handedness = "Right"
             if i < len(result.handedness) and result.handedness[i]:
                 handedness = result.handedness[i][0].category_name
 
-            # Convert to LandmarkPoint list mapped to full output resolution
+            # 1€ Filter initialization for this hand
+            if handedness not in self._euro_landmarks:
+                fc_min = getattr(config, "ONE_EURO_FC_MIN", 0.85)
+                beta = getattr(config, "ONE_EURO_BETA", 0.045)
+                d_cut = getattr(config, "ONE_EURO_D_CUTOFF", 1.0)
+                self._euro_landmarks[handedness] = [
+                    OneEuroFilter(fc_min=fc_min, beta=beta, d_cutoff=d_cut)
+                    for _ in range(21)
+                ]
+                self._euro_palm_center[handedness] = OneEuroFilter(fc_min=fc_min, beta=beta, d_cutoff=d_cut)
+                self._euro_normal[handedness] = OneEuroFilter(fc_min=fc_min, beta=beta, d_cutoff=d_cut)
+                self._euro_up_3d[handedness] = OneEuroFilter(fc_min=fc_min, beta=beta, d_cutoff=d_cut)
+                self._euro_scale[handedness] = OneEuroFilter(fc_min=fc_min, beta=beta, d_cutoff=d_cut)
+
+            prev_proc_t = self._last_process_time.get(handedness, now_sec - 0.033)
+            dt_euro = float(np.clip(now_sec - prev_proc_t, 0.001, 0.1))
+            self._last_process_time[handedness] = now_sec
+
+            # Filter raw 3D landmarks through 1€ Adaptive Low-Pass Filter bank
             points: List[LandmarkPoint] = []
-            for lm in raw_landmarks:
-                px = int(lm.x * width)
-                py = int(lm.y * height)
+            for lm_idx, lm in enumerate(raw_landmarks):
+                raw_vec = np.array([lm.x, lm.y, lm.z], dtype=np.float32)
+                filt_vec = self._euro_landmarks[handedness][lm_idx].filter(raw_vec, dt_euro)
+                px = int(round(filt_vec[0] * width))
+                py = int(round(filt_vec[1] * height))
                 points.append(
-                    LandmarkPoint(x=lm.x, y=lm.y, z=lm.z, px=px, py=py)
+                    LandmarkPoint(x=float(filt_vec[0]), y=float(filt_vec[1]), z=float(filt_vec[2]), px=px, py=py)
                 )
 
             # 1. Compute Palm Center
             palm_indices = [0, 5, 9, 13, 17]
             raw_cx = sum(points[idx].px for idx in palm_indices) / len(palm_indices)
             raw_cy = sum(points[idx].py for idx in palm_indices) / len(palm_indices)
+
 
             # 2. Compute 2D & 3D Palm Orientation Vectors
             wrist = points[0]
@@ -415,7 +461,8 @@ class HandTracker:
             is_open = open_ratio >= 0.6
 
             # 7. Fingertip Kinematics & Velocity Calculation (Thumb, Index, Middle, Ring, Pinky)
-            now_sec = time.time()
+            # Uses the monotonic VIDEO-mode timestamp clock (same basis as the 1€
+            # filter), avoiding extra wall-clock syscalls per hand per frame.
             prev_time = self._prev_finger_time.get(handedness, now_sec - 0.033)
             dt_finger = float(np.clip(now_sec - prev_time, 0.005, 0.1))
             self._prev_finger_time[handedness] = now_sec
@@ -478,7 +525,7 @@ class HandTracker:
             pinch_mid = (thumb_pos + index_pos) * 0.5
             pinch_point_3d = (float(pinch_mid[0]), float(pinch_mid[1]), float(pinch_mid[2]))
 
-            # 9. Palm 3D Velocity & Forward Thrust / Waving Speed
+            # 9. Palm 3D Velocity & Forward Thrust / Waving Speed (same timestamp clock)
             curr_palm_vec = np.array([cx, cy, cz], dtype=np.float32)
             prev_p_time = self._prev_palm_time.get(handedness, now_sec - 0.033)
             dt_palm = float(np.clip(now_sec - prev_p_time, 0.005, 0.1))
@@ -498,11 +545,44 @@ class HandTracker:
             self._prev_palm_pos[handedness] = curr_palm_vec
             self._prev_palm_vel[handedness] = p_vel
 
-            # Calculate thrust along palm normal or camera forward direction
-            vel_along_norm = float(np.dot(p_vel, norm_3d))
-            cam_forward_vel = -float(p_vel[2])
-            thrust_speed = max(0.0, vel_along_norm, cam_forward_vel) if is_open else 0.0
+            # Palm speed (px/s) drives tornado-wave detection; thrust speed is the
+            # forward push component along the outward palm normal and drives
+            # Force Push. Both default to 0 on the first sighting of a hand.
             palm_speed = float(np.linalg.norm(p_vel))
+            thrust_speed = float(max(0.0, float(np.dot(p_vel, smoothed_normal))))
+
+            # 10. Full-Hand Biomechanical Capsule Colliders (14 Phalanx Bones + Palm Plate)
+            bone_capsules: List[BoneCapsuleCollider] = []
+            if getattr(config, "FULL_HAND_CAPSULE_ENABLED", True):
+                joints_3d: List[np.ndarray] = []
+                for pt in points:
+                    jx = float(pt.px)
+                    jy = float(pt.py)
+                    jz = float(cz + (pt.z - wrist.z) * width * 1.2)
+                    joints_3d.append(np.array([jx, jy, jz], dtype=np.float32))
+
+                base_radius = getattr(config, "CAPSULE_BONE_RADIUS", 15.0)
+                for start_idx, end_idx in self.BONES:
+                    p0 = joints_3d[start_idx]
+                    p1 = joints_3d[end_idx]
+                    is_distal = end_idx in self.FINGER_TIPS
+                    is_palm = start_idx in palm_indices and end_idx in palm_indices
+                    if is_palm:
+                        r_bone = base_radius * 1.2
+                    elif is_distal:
+                        r_bone = base_radius * 0.85
+                    else:
+                        r_bone = base_radius
+
+                    bone_capsules.append(
+                        BoneCapsuleCollider(
+                            name=f"{handedness}_{start_idx}_{end_idx}",
+                            p0=p0,
+                            p1=p1,
+                            radius=r_bone,
+                            velocity=p_vel.copy(),
+                        )
+                    )
 
             pose = HandPose(
                 handedness=handedness,
@@ -522,6 +602,7 @@ class HandTracker:
                 pitch_deg=pitch_deg,
                 roll_deg=roll_deg,
                 fingers=finger_colliders,
+                capsules=bone_capsules,
                 is_pinching=is_pinching,
                 pinch_point_3d=pinch_point_3d if is_pinching else None,
                 pinch_dist_px=pinch_dist,
@@ -563,3 +644,71 @@ class HandTracker:
         """Release MediaPipe resources."""
         if hasattr(self, "detector") and self.detector:
             self.detector.close()
+
+
+class TrackingWorker:
+    """Runs HandTracker inference on a background thread for realtime display.
+
+    MediaPipe detection costs ~30-60ms on CPU. Called inline, it stalls the
+    render loop so the video *and* skeleton lag behind the hand. This worker
+    instead consumes the newest camera frame whenever it is free (dropping
+    stale frames) and publishes the latest poses lock-free to the render
+    thread, which never blocks and always draws the freshest camera image.
+    The HandTracker instance is owned exclusively by this thread.
+    """
+
+    def __init__(self, tracker: "HandTracker", camera: object, mirror: bool = True) -> None:
+        self._tracker = tracker
+        self._camera = camera
+        self._mirror = mirror
+        self._lock = threading.Lock()
+        self._poses: List[HandPose] = []
+        self._frame_id: int = -1
+        self._stopped = False
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        """Launch the background inference loop (daemon thread)."""
+        self._stopped = False
+        self._thread = threading.Thread(
+            target=self._loop, name="TrackingWorker", daemon=True
+        )
+        self._thread.start()
+
+    def _loop(self) -> None:
+        last_id = -1
+        while not self._stopped:
+            ok, frame, frame_id = self._camera.read_latest()
+            if not ok or frame is None or frame_id == last_id:
+                time.sleep(0.002)
+                continue
+            last_id = frame_id
+            if self._mirror:
+                frame = cv2.flip(frame, 1)
+            # Monotonic clock: VIDEO mode rejects non-increasing timestamps.
+            ts = int(time.monotonic() * 1000)
+            try:
+                poses = self._tracker.process_frame(frame, ts)
+            except Exception:
+                continue
+            with self._lock:
+                self._poses = poses
+                self._frame_id = frame_id
+
+    def get_latest(self) -> Tuple[List[HandPose], int]:
+        """Return (poses, frame_id) without blocking. Poses may be one inference behind."""
+        with self._lock:
+            return list(self._poses), self._frame_id
+
+    def set_camera(self, camera: object) -> None:
+        """Hot-swap the video source (e.g. after a camera switch)."""
+        with self._lock:
+            self._camera = camera
+            self._poses = []
+            self._frame_id = -1
+
+    def stop(self) -> None:
+        """Signal shutdown and wait briefly for the thread to exit."""
+        self._stopped = True
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=1.0)

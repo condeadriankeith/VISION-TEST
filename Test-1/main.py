@@ -15,7 +15,7 @@ import numpy as np
 from camera import CameraManager, ThreadedCamera
 import config
 from cube_renderer import CubeHologramRenderer
-from hand_tracker import HandPose, HandTracker
+from hand_tracker import HandPose, HandTracker, TrackingWorker
 
 
 class HologramApplication:
@@ -36,10 +36,19 @@ class HologramApplication:
         self.prev_frame_time: float = time.time()
         self.current_fps: float = 0.0
 
+        # Cached HUD tint buffers (avoids two full-slice allocations per frame)
+        self._top_tint: Optional[np.ndarray] = None
+        self._bottom_tint: Optional[np.ndarray] = None
+
         # Initialize Threaded Camera Stream (non-blocking, zero-latency buffer)
         target_idx = config.CAMERA_INDEX if camera_index is None else camera_index
         print(f"[HologramApp] Connecting to camera {target_idx} (main camera)...")
         self.camera: ThreadedCamera = CameraManager.open_best_camera(preferred_index=target_idx)
+
+        # Async inference: MediaPipe runs on its own thread so the render loop
+        # stays at full frame rate and the skeleton tracks with minimal lag.
+        self.tracking_worker: TrackingWorker = TrackingWorker(self.tracker, self.camera)
+        self.tracking_worker.start()
 
     @property
     def current_cam_index(self) -> int:
@@ -53,6 +62,8 @@ class HologramApplication:
         try:
             old_cam = self.camera
             self.camera = CameraManager.open_camera(next_idx)
+            # Re-point the inference worker at the new stream.
+            self.tracking_worker.set_camera(self.camera)
             old_cam.release()
             print(f"[HologramApp] Switched to Camera {self.camera.index}.")
         except Exception as err:
@@ -78,8 +89,9 @@ class HologramApplication:
         # 1. Top HUD Bar (Blend only the top slice, 40x faster than full frame copy)
         top_bar_height = 54
         top_slice = frame[0:top_bar_height, :]
-        top_tint = np.full_like(top_slice, (18, 20, 26))
-        cv2.addWeighted(top_slice, 0.25, top_tint, 0.75, 0, top_slice)
+        if self._top_tint is None or self._top_tint.shape != top_slice.shape:
+            self._top_tint = np.full(top_slice.shape, (18, 20, 26), dtype=np.uint8)
+        cv2.addWeighted(top_slice, 0.25, self._top_tint, 0.75, 0, top_slice)
         cv2.line(frame, (0, top_bar_height), (w, top_bar_height), material.hud_accent, 1)
 
         # 2. Status Indicators & Dynamic Telekinesis / Collision Feedback
@@ -170,8 +182,9 @@ class HologramApplication:
         # 3. Bottom Controls Info Bar (Blend only the bottom slice)
         bottom_bar_y = h - 36
         bottom_slice = frame[bottom_bar_y:h, :]
-        bottom_tint = np.full_like(bottom_slice, (10, 12, 16))
-        cv2.addWeighted(bottom_slice, 0.30, bottom_tint, 0.70, 0, bottom_slice)
+        if self._bottom_tint is None or self._bottom_tint.shape != bottom_slice.shape:
+            self._bottom_tint = np.full(bottom_slice.shape, (10, 12, 16), dtype=np.uint8)
+        cv2.addWeighted(bottom_slice, 0.30, self._bottom_tint, 0.70, 0, bottom_slice)
 
         skel_status = "VISIBLE" if self.show_skeleton else "INVISIBLE"
         instructions = (
@@ -194,22 +207,17 @@ class HologramApplication:
     def run(self) -> None:
         """High-performance camera acquisition and rendering loop."""
         print("[HologramApp] Application running.")
-        print("[HologramApp] Hold your hand(s) in front of the camera:")
-        print("  - OPEN palm: 3 holographic cubes blossom out in a flowy fountain arc.")
-        print("  - CLOSE palm: cubes spiral smoothly into your palm via vortex whirlpool.")
-        print("  - WAVE OPEN PALM FASTER: Whirling 3D procedural tornado cyclone for all 3 cubes!")
-        print("  - PINCH (Thumb + Index): Clean optimized telekinetic grip without visual clutter — grab and fling!")
-        print("  - PALM FORWARD THRUST: Telekinetic Force Push blasts cubes away!")
-        print("  - CUBES COLLIDE: Real billiard-ball elastic rebound & corner-aware momentum transfer!")
-        print("  - SHOW 2ND PALM: cubes procedurally bridge the middle between both hands.")
-        print("  - Press 'V' to switch between cameras.")
-        print("  - Press 'S' to toggle virtual skeleton overlay.")
-        print("  - Press 'Q' or 'Esc' to exit.")
+        print("[HologramApp] Procedural Physics & Visual Grounding Active:")
+        print("  - 1€ (One Euro) Adaptive Motion Filter: Zero-jitter stillness + zero-lag flick dynamics.")
+        print("  - 3D Divergence-Free Curl Noise: Volume-preserving quantum fluid microgravity turbulence.")
+        print("  - OBB-to-OBB 15-Axis SAT: Corner-aware bounding box collision response & contact torque.")
+        print("  - Biomechanical Bone Capsules: 14 phalanx swept-colliders for whole-hand tactile interaction.")
+        print("  - Physical Thin-Film Wave Interference: Angle-dependent iridescent reflectance shimmer.")
+        print("  - Telekinesis: Pinch-Grip (Thumb+Index) to grab/fling & Forward Palm Thrust for Force Push.")
+        print("  - Dual-Palm Mode: Procedural 3D midpoint accordion bridge between hands.")
+        print("  - Press 'V' to switch cameras | 'S' to toggle skeleton | 'Q' or 'Esc' to exit.")
 
         cv2.namedWindow(config.WINDOW_TITLE, cv2.WINDOW_NORMAL)
-
-        last_frame_id = -1
-        cached_poses: List[HandPose] = []
 
         try:
             while True:
@@ -219,8 +227,8 @@ class HologramApplication:
                 if dt > 0:
                     self.current_fps = 0.92 * self.current_fps + 0.08 * (1.0 / dt)
 
-                # Instantly retrieve freshest camera frame from background thread
-                success, frame, frame_id = self.camera.read_latest()
+                # Freshest camera frame, never blocked by inference.
+                success, frame, _frame_id = self.camera.read_latest()
                 if not success or frame is None:
                     time.sleep(0.002)
                     continue
@@ -228,13 +236,9 @@ class HologramApplication:
                 # Mirror frame horizontally so gestures feel natural like looking in a mirror
                 frame = cv2.flip(frame, 1)
 
-                # If this is a newly arrived camera frame, update hand detection
-                if frame_id != last_frame_id:
-                    last_frame_id = frame_id
-                    timestamp_ms = int(current_time * 1000)
-                    cached_poses = self.tracker.process_frame(frame, timestamp_ms)
+                # Latest async tracking result (non-blocking; at most one inference behind).
+                poses, _tracked_id = self.tracking_worker.get_latest()
 
-                poses = cached_poses
                 hand_detected = len(poses) > 0
                 is_open = any(p.is_open for p in poses) if hand_detected else False
 
@@ -283,6 +287,8 @@ class HologramApplication:
     def cleanup(self) -> None:
         """Release camera, windows, and resources safely."""
         print("[HologramApp] Cleaning up resources...")
+        if hasattr(self, "tracking_worker"):
+            self.tracking_worker.stop()
         if hasattr(self, "camera"):
             self.camera.release()
         if hasattr(self, "tracker"):

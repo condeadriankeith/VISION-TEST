@@ -16,6 +16,13 @@ from typing import Any, List, Optional, Tuple
 
 import numpy as np
 
+from spatial_math import (
+    BoneCapsuleCollider,
+    CurlNoise3D,
+    OBB3D,
+    OBBSATCollider,
+    SATCollisionResult,
+)
 import config
 
 
@@ -92,6 +99,15 @@ class PhysicsCube:
         self.recoil_timer: float = 0.0
         self.impact_energy: float = 0.0
         self.last_impact_pos: Optional[np.ndarray] = None
+
+    def get_obb(self) -> OBB3D:
+        """Returns 3D Oriented Bounding Box representation for SAT collision queries."""
+        half_dim = max(config.CUBE_SIZE * self.current_scale, 1.0)
+        return OBB3D(
+            center=self.position.copy(),
+            rotation=self.rotation_matrix.copy(),
+            half_extents=np.array([half_dim, half_dim, half_dim], dtype=np.float32),
+        )
 
     def _init_rotation_from_angles(self) -> None:
         """Initialize 3D rotation matrix from Euler angles."""
@@ -229,6 +245,10 @@ class CubePhysicsWorld:
         self.force_push_active: float = 0.0
         self.last_force_push_pos: Optional[np.ndarray] = None
         self.last_fling_speed: float = 0.0
+
+        # Divergence-Free 3D Curl Noise Field (Organic Turbulence)
+        self.curl_noise: CurlNoise3D = CurlNoise3D()
+        self.simulation_time: float = 0.0
 
     def step(
         self,
@@ -545,8 +565,16 @@ class CubePhysicsWorld:
                     dist_gain = float(np.clip(dist_palm / 120.0, 0.30, 1.0))
                     suck_force += tangent * (cube.swirl_dir * swirl_strength * suck_flow * dist_gain * cube.mass * 0.065)
 
-            # Total force and linear acceleration
-            net_force = spring_force + damping_force + air_drag + cushion_force + suck_force + (inertial_accel * cube.mass)
+            # Divergence-Free 3D Curl Noise Field (Volume-Preserving Organic Turbulence)
+            curl_force = np.zeros(3, dtype=np.float32)
+            if getattr(config, "CURL_NOISE_ENABLED", True) and should_spawn and cube.emergence > 0.35:
+                t_speed = getattr(config, "CURL_NOISE_TEMPORAL_SPEED", 0.85)
+                c_vel = self.curl_noise.evaluate(cube.position, self.simulation_time * t_speed)
+                c_strength = getattr(config, "CURL_NOISE_STRENGTH", 42.0)
+                curl_force = (c_vel * (c_strength * cube.emergence * cube.mass)).astype(np.float32)
+
+            # Total force and linear acceleration (Symplectic Euler integration)
+            net_force = spring_force + damping_force + air_drag + cushion_force + suck_force + curl_force + (inertial_accel * cube.mass)
             accel = net_force / cube.mass
             cube.velocity += accel * dt
             # Clamp vacuum speed so it stays smooth, never teleporty
@@ -618,12 +646,26 @@ class CubePhysicsWorld:
                 min_dist = effective_r1 + effective_r2
 
                 if dist < min_dist:
-                    if dist < 1e-4:
-                        norm = np.array([1.0, 0.0, 0.0], dtype=np.float32)
-                        overlap = min_dist
+                    # 15-axis Separating Axis Theorem (SAT) narrowphase check
+                    use_sat = getattr(config, "OBB_SAT_COLLISION_ENABLED", True)
+                    sat_res = None
+                    if use_sat and c1.current_scale > 0.15 and c2.current_scale > 0.15:
+                        sat_res = OBBSATCollider.test_collision(c1.get_obb(), c2.get_obb())
+                        if sat_res is None:
+                            continue  # Clean separating axis exists between oriented bounding boxes
+
+                    if sat_res is not None:
+                        norm = sat_res.contact_normal
+                        overlap = sat_res.penetration
+                        contact_pt = sat_res.contact_point
                     else:
-                        norm = (diff / dist).astype(np.float32)
-                        overlap = min_dist - dist
+                        if dist < 1e-4:
+                            norm = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+                            overlap = min_dist
+                        else:
+                            norm = (diff / dist).astype(np.float32)
+                            overlap = min_dist - dist
+                        contact_pt = c1.position - norm * (effective_r1 - overlap * 0.5)
 
                     # Positional separation: respect grabbed vs free rigid bodies
                     if not c1.is_grabbed and not c2.is_grabbed:
@@ -634,7 +676,6 @@ class CubePhysicsWorld:
                     elif not c1.is_grabbed and c2.is_grabbed:
                         c1.position += norm * (overlap * 0.95)
 
-                    contact_pt = c1.position - norm * (effective_r1 - overlap * 0.5)
                     r1 = contact_pt - c1.position
                     r2 = contact_pt - c2.position
 
@@ -697,11 +738,75 @@ class CubePhysicsWorld:
                                 )
                             )
 
-        # 3. Dynamic Finger-to-Cube 6-DOF Physical Collisions (Pokes, Flicks, Deflections)
+        # 3. Dynamic Full-Hand Capsule & Fingertip 6-DOF Physical Collisions
         now_t = time.time()
         self.recent_contacts = [c for c in self.recent_contacts if (now_t - c.timestamp) < 0.5]
 
-        if finger_colliders:
+        # Gather active bone capsules from all detected hands
+        all_capsules: List[BoneCapsuleCollider] = []
+        if poses:
+            for p in poses:
+                if hasattr(p, "capsules") and p.capsules:
+                    all_capsules.extend(p.capsules)
+
+        if all_capsules:
+            for cube in self.cubes:
+                if cube.current_scale <= 0.05:
+                    continue
+                effective_radius = cube.radius * cube.current_scale
+
+                for cap in all_capsules:
+                    col_result = cap.test_sphere_collision(cube.position, effective_radius)
+                    if col_result is None:
+                        continue
+                    norm, overlap, contact_pt = col_result
+
+                    # Positional separation: push cube away from penetrating bone segment
+                    cube.position += norm * (overlap * 0.88)
+                    r_arm = contact_pt - cube.position
+
+                    # Relative velocity including rotational spin
+                    u_cube = cube.velocity + np.cross(cube.angular_velocity, r_arm)
+                    v_rel = u_cube - cap.velocity
+                    v_norm = float(np.dot(v_rel, norm))
+
+                    if v_norm < 0.0 or overlap > 1.5:
+                        e = config.FINGER_RESTITUTION
+                        base_impulse = max(-(1.0 + e) * v_norm, 18.0) * cube.mass
+                        bone_speed_into_cube = float(np.dot(cap.velocity, norm))
+                        if bone_speed_into_cube > config.FINGER_FLICK_MIN_SPEED:
+                            base_impulse += bone_speed_into_cube * config.FINGER_FLICK_IMPULSE_SCALE * cube.mass
+
+                        impulse_n = norm * base_impulse
+
+                        # Tangential friction impulse
+                        v_tangent = v_rel - v_norm * norm
+                        tan_speed = float(np.linalg.norm(v_tangent))
+                        if tan_speed > 1e-3:
+                            tan_dir = v_tangent / tan_speed
+                            friction_mag = min(config.COLLISION_FRICTION * base_impulse, tan_speed * cube.mass)
+                            impulse_t = -tan_dir * friction_mag
+                        else:
+                            impulse_t = np.zeros(3, dtype=np.float32)
+
+                        total_impulse = impulse_n + impulse_t
+                        cube.velocity += total_impulse / cube.mass
+                        torque = np.cross(r_arm, total_impulse) * config.FINGER_TORQUE_FACTOR
+                        cube.angular_velocity += cube.inv_inertia * torque
+                        cube.recoil_timer = getattr(config, "CUBE_RECOIL_DURATION", 0.45)
+                        cube.impact_energy = min(1.0, cube.impact_energy + float(np.linalg.norm(total_impulse)) / 160.0)
+
+                        self.recent_contacts.append(
+                            ContactEvent(
+                                finger_name=cap.name,
+                                cube_index=cube.index,
+                                contact_pos=contact_pt.copy(),
+                                contact_normal=norm.copy(),
+                                impulse_mag=float(np.linalg.norm(total_impulse)),
+                                timestamp=now_t,
+                            )
+                        )
+        elif finger_colliders:
             for cube in self.cubes:
                 if cube.current_scale <= 0.05:
                     continue
@@ -740,7 +845,6 @@ class CubePhysicsWorld:
                         # Apply impulse if moving into finger or sustained overlap push
                         if v_norm < 0.0 or overlap > 1.5:
                             e = config.FINGER_RESTITUTION
-                            # Base restitution impulse
                             base_impulse = max(-(1.0 + e) * v_norm, 18.0) * cube.mass
 
                             # Flick speed boost: if finger is moving fast toward the cube, transfer momentum!
