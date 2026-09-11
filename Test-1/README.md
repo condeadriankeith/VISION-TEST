@@ -1,75 +1,98 @@
-# Hand Gesture 3D Hologram Application
+# Test-1 — Hand Gesture 3D Hologram
 
-A complete, high-performance Python application that turns your webcam into an interactive holographic display using **MediaPipe** and **OpenCV**. The application maps an invisible 3D virtual hand skeleton, detects open vs. closed palm gestures, and spawns three animated 3D hovering cubes above your palm that smoothly scale down and vanish when you close your fist.
+> **Milestone 1** · The original prototype. Turns your webcam into an interactive holographic display using MediaPipe hand tracking and a pure-NumPy software 3D renderer.
 
 ---
 
-## Key Features
+## What It Does
 
-- **Real-Time Hand Detection & Virtual Skeleton**: Tracks 21 anatomical landmarks per hand in 3D. The skeleton operates as an invisible virtual tracker, with an optional toggle (`S` key) to reveal a glowing skeleton overlay.
-- **True 3D Solid Grey Rendered Cubes**:
-  - **Blinn-Phong Lighting**: Key directional light + soft ambient fill light + crisp specular highlights.
-  - **Smooth Beveled Edges**: Front-facing edges are highlighted with subtle micro-bevels for a tangible manufactured appearance.
-  - **No Palm Tethers**: Floating freely without connecting lines or clutter.
-- **Newtonian Rigid-Body Physics & Collisions**:
-  - **Pairwise Elastic Collisions**: When cubes come into contact, they push apart with restitution impulse and tangential spin torque so they never clip or overlap.
-  - **Spring-Damper Hovering**: Cubes are gently tethered by physical spring-dampers to procedural slots above your palm, swaying realistically with hand momentum.
-  - **Procedural Inertia**: If you whip or tilt your hand, cubes physically lag behind with mass and momentum.
-- **Smooth Spawn & Vanish Transitions**:
-  - **Open Palm**: Cubes physically push outward from your palm and settle into formation.
-  - **Closed Palm (Fist)**: Cubes smoothly retract inward and vanish completely.
-- **4 Switchable Grey Materials**:
-  - Studio Matte Grey, Gunmetal Slate, Platinum Ceramic, Obsidian Graphite (switch via `C` key).
+Detects your hand in real time, classifies open vs. closed palm gestures, and spawns **three animated 3D cubes** that float above your palm. The cubes physically respond to hand motion, collide with each other, and smoothly vanish when you close your fist.
+
+---
+
+## Features
+
+- **21-point 3D Hand Skeleton** — MediaPipe HandLandmarker tracks anatomical landmarks in full 3D. Optional glowing skeleton overlay (`S` key).
+- **Blinn-Phong Shaded Cubes** — Software-rasterized solid grey cubes with directional key light, soft ambient fill, and specular highlights. Smooth beveled edges give a manufactured, tangible look.
+- **Spring-Damper Hovering** — Cubes are physically tethered to procedural slots above your palm. Whip or tilt your hand and they physically lag behind with mass and momentum.
+- **Pairwise Elastic Collisions** — Cubes push apart with restitution impulse and tangential spin torque so they never clip or overlap.
+- **Smooth Spawn / Vanish** — Open palm: cubes push outward and settle into formation. Closed fist: cubes retract inward and disappear.
+- **4 Switchable Materials** — Studio Matte Grey, Gunmetal Slate, Platinum Ceramic, Obsidian Graphite (`C` key).
 
 ---
 
 ## File Structure
 
 ```
-VISION-TEST/
-├── main.py              # Application loop, camera capture, HUD, and keyboard controls
-├── hand_tracker.py       # MediaPipe HandLandmarker wrapper, virtual skeleton, gesture classifier
-├── cube_renderer.py      # 3D geometry math, perspective projection, depth sorting, shading
-├── config.py             # Configuration parameters, physics constants, color themes
-├── test_pipeline.py      # Automated verification test suite
-├── requirements.txt      # Python dependencies (opencv-python, mediapipe, numpy)
-└── hand_landmarker.task  # Downloaded MediaPipe hand landmarker model
+Test-1/
+├── main.py             # Application loop, camera capture, HUD, keyboard controls
+├── hand_tracker.py     # MediaPipe HandLandmarker wrapper, gesture classifier
+├── cube_renderer.py    # 3D geometry, perspective projection, depth sorting, shading
+├── config.py           # Physics constants, color themes, display settings
+├── physics.py          # Spring-damper, collision resolution, rigid body dynamics
+├── camera.py           # Camera capture and device switching
+├── spatial_math.py     # 3D vector / rotation utility functions
+├── test_pipeline.py    # Automated verification test suite
+├── requirements.txt    # Python dependencies
+└── run.bat             # Windows one-click launcher
 ```
 
 ---
 
 ## Installation & Setup
 
-1. **Activate your Python 3.10+ / 3.12 environment**:
-   ```bash
-   pip install -r requirements.txt
-   ```
+**Requirements:** Python 3.10+ · A working webcam
 
-2. **Launch the application**:
-   - Double-click [`run.bat`](file:///c:/Users/conde/Downloads/VISION-TEST/run.bat) (Windows 1-click launcher)
-   - Or run from terminal:
-     ```bash
-     python main.py
-     ```
+```powershell
+pip install -r requirements.txt
+```
+
+> The `hand_landmarker.task` MediaPipe model file must be present in this folder.
+> If missing, download it from the [MediaPipe Models page](https://developers.google.com/mediapipe/solutions/vision/hand_landmarker).
 
 ---
 
-## Interactive Controls
+## Running
+
+```powershell
+# Option 1 — terminal
+python main.py
+
+# Option 2 — Windows launcher
+run.bat
+```
+
+---
+
+## Controls
 
 | Key | Action |
 | :---: | :--- |
-| **Open Palm** | Spawns and expands the 3 hovering 3D cubes above your palm. |
-| **Close Palm / Fist** | Smoothly shrinks and vanishes the cubes. |
-| **`V`** | Switch Camera (cycles between available camera devices live). |
-| **`S`** | Toggle Virtual Skeleton visibility (Invisible $\leftrightarrow$ Glowing Cyberpunk Skeleton). |
-| **`C`** | Cycle Color Themes (Cyber Cyan $\rightarrow$ Neon Violet $\rightarrow$ Matrix Emerald $\rightarrow$ Solar Amber). |
-| **`Q` / `Esc`** | Cleanly exit the program and release the camera. |
+| **Open Palm** | Spawns and expands the 3 hovering 3D cubes |
+| **Closed Fist** | Smoothly shrinks and vanishes the cubes |
+| **`V`** | Switch camera (cycles between detected devices) |
+| **`S`** | Toggle virtual skeleton overlay |
+| **`C`** | Cycle material themes |
+| **`Q` / `Esc`** | Exit |
 
 ---
 
-## Automated Verification
+## Automated Tests
 
-To run the automated verification test suite:
-```bash
+```powershell
 python test_pipeline.py
 ```
+
+---
+
+## Dependencies
+
+| Package | Version | Purpose |
+| :--- | :--- | :--- |
+| `opencv-python` | ≥ 4.9.0 | Camera capture & image rendering |
+| `mediapipe` | ≥ 0.10.14 | Hand landmark detection |
+| `numpy` | ≥ 1.26.0 | 3D math, projection, physics |
+
+---
+
+> ← [Back to root](../README.md) &nbsp;|&nbsp; Next milestone → [Test-2](../Test-2/README.md)
